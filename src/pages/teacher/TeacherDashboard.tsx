@@ -190,7 +190,7 @@ const TeacherDashboard = () => {
       const recipients = emailList.map(email => ({ email, name: 'Student' }));
 
       // Call API
-      const response = await fetch('http://localhost:3001/api/notify', {
+      const response = await fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001'}/api/notify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

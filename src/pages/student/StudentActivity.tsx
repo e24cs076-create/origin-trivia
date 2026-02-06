@@ -206,7 +206,7 @@ const StudentActivity = () => {
           }
           if (q.rubric) rubricText += ` Additional Rubric: ${q.rubric}`;
 
-          const response = await fetch('http://localhost:3001/api/evaluate', {
+          const response = await fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001'}/api/evaluate`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -282,7 +282,7 @@ const StudentActivity = () => {
     setCompileOutput({ ...compileOutput, [questionId]: { output: '', error: '' } });
 
     try {
-      const response = await fetch('http://localhost:3001/api/compile', {
+      const response = await fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001'}/api/compile`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code }),
