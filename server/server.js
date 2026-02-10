@@ -13,8 +13,19 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const port = 3001;
 
-app.use(cors());
-app.use(bodyParser.json());
+app.use(cors({
+    origin: ['http://localhost:8080', 'http://localhost:5173', 'http://127.0.0.1:8080', 'https://origin-trivia.netlify.app'],
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+}));
+app.use(bodyParser.json({ limit: '10mb' }));
+app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }));
+
+// Request Logging Middleware
+app.use((req, res, next) => {
+    console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
+    next();
+});
 
 // Ensure temp directory exists
 // Ensure temp directory exists
@@ -85,68 +96,63 @@ Evaluate now and return ONLY the JSON.`
     }
 });
 
-app.post('/api/compile', (req, res) => {
-    const { code } = req.body;
+app.post('/api/compile', async (req, res) => {
+    const { code, language = 'java' } = req.body;
 
     if (!code) {
         return res.status(400).json({ error: 'No code provided' });
     }
 
-    // Create a unique temporary directory for this request to avoid collisions
-    const requestId = crypto.randomUUID();
-    const requestDir = path.join(tempDir, requestId);
-    fs.mkdirSync(requestDir);
+    // Piston Language Mapping
+    // Client sends 'java', Piston expects 'java'
+    // If strict match needed:
+    const pistonLang = language === 'java' ? 'java' : language;
+    const pistonVersion = language === 'java' ? '15.0.2' : '*';
 
-    const filePath = path.join(requestDir, 'Main.java');
+    try {
+        const response = await fetch("https://emkc.org/api/v2/piston/execute", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                language: pistonLang,
+                version: pistonVersion,
+                files: [
+                    {
+                        name: "Main.java", // Helps Piston identify the entry point
+                        content: code
+                    }
+                ]
+            })
+        });
 
-    // Attempt to detect class name or just force Main?
-    // For simplicity, we'll assume the user is writing a class named Main or we rename it.
-    // BUT, in Java, public class name must match file name.
-    // Let's assume the user code *contains* "class Main".
-    // If not, we might fail.
-    // Better approach: Regex to find "public class \w+" and use that as filename.
-    // Fallback to "Main" if not found (assuming non-public class or default).
+        const data = await response.json();
 
-    let className = 'Main';
-    const classMatch = code.match(/public\s+class\s+(\w+)/);
-    if (classMatch && classMatch[1]) {
-        className = classMatch[1];
-    }
-
-    const javaFile = path.join(requestDir, `${className}.java`);
-
-    fs.writeFile(javaFile, code, (err) => {
-        if (err) {
-            return res.status(500).json({ error: 'Failed to write code to file' });
+        // Piston Error (API level)
+        if (data.message) {
+            console.error("Piston API Error:", data.message);
+            return res.json({
+                output: '',
+                error: `Piston API Error: ${data.message}`
+            });
         }
 
-        // Compile
-        exec(`javac "${javaFile}"`, { cwd: requestDir }, (compileErr, compileStdout, compileStderr) => {
-            if (compileErr) {
-                // cleanup
-                fs.rmSync(requestDir, { recursive: true, force: true });
-                return res.json({ output: '', error: `Compilation Error:\n${compileStderr}` });
-            }
+        // Execution Result
+        // { run: { stdout, stderr, code, signal, output } }
+        // We map to { output, error }
 
-            // Run
-            // Using exec for simplicity, but spawn is safer for long running or streaming.
-            // Set a timeout to prevent infinite loops.
-            const runProcess = exec(`java -cp . ${className}`, { cwd: requestDir, timeout: 5000 }, (runErr, runStdout, runStderr) => {
-                // cleanup
-                fs.rmSync(requestDir, { recursive: true, force: true });
+        const { stdout, stderr } = data.run || {};
 
-                if (runErr && runErr.killed) {
-                    return res.json({ output: '', error: 'Execution Timed Out' });
-                }
-
-                if (runErr) {
-                    return res.json({ output: runStdout, error: `Runtime Error:\n${runStderr || runErr.message}` });
-                }
-
-                res.json({ output: runStdout, error: runStderr });
-            });
+        res.json({
+            output: stdout || '',
+            error: stderr || ''
         });
-    });
+
+    } catch (error) {
+        console.error("Compiler API Error (Piston):", error);
+        res.status(500).json({ error: 'Failed to execute code via Piston API' });
+    }
 });
 
 app.post('/api/notify', async (req, res) => {
@@ -155,17 +161,21 @@ app.post('/api/notify', async (req, res) => {
     // recipients: [{ email, name, student_id }]
     // quizDetails: { title, subject, branch, year, semester, link }
 
+    console.log(`[NOTIFICATION] Received request. Recipients: ${recipients?.length}, Subject: ${quizDetails.subject}`);
+
     if (!recipients || recipients.length === 0) {
+        console.warn("[NOTIFICATION] No recipients provided.");
         return res.json({ success: true, message: 'No recipients provided' });
     }
 
     console.log(`[NOTIFICATION] Preparing emails for ${recipients.length} students...`);
 
     // Verify Email Config
-    if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS || process.env.EMAIL_USER.includes('your-email')) {
-        console.warn("Email credentials missing in .env. Falling back to SIMULATION.");
-        // Fallback logic or error? User asked for real mail.
-        // Let's simulation if credentials are defaults, but warn.
+    if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+        console.error("[NOTIFICATION] Missing EMAIL_USER or EMAIL_PASS in environment variables.");
+        // Continue but warn
+    } else {
+        console.log(`[NOTIFICATION] Email Config Found. User: ${process.env.EMAIL_USER}`);
     }
 
     const transporter = nodemailer.createTransport({
@@ -189,17 +199,39 @@ app.post('/api/notify', async (req, res) => {
             const subject = (customSubject || "New Quiz Available: {{quiz_title}}")
                 .replace('{{quiz_title}}', quizDetails.title);
 
-            const defaultBody = `Hello {{student_name}},\n\nA new quiz has been published for your class.\n\nSubject: {{subject}}\nBranch: {{branch}}\nYear: {{year}}\nSemester: {{semester}}\n\nPlease log in to Origin Trivia to attempt the quiz.\n\nRegards,\nOrigin Trivia Team`;
+            const defaultBody = `Hello {{student_name}},
+
+A new activity has been published for your class.
+
+Activity Name : {{Activity_Name}}
+Subject       : {{Subject}}
+Branch        : {{Branch}}
+Year          : {{Year}}
+Semester      : {{Semester}}
+Published On  : {{Publish_Date}}
+Deadline      : {{Deadline}}
+
+Please log in to the Origin Trivia platform and complete the activity within the given time.
+https://origin-trivia.netlify.app/
+If you have any questions, contact your faculty.
+
+Best regards,
+{{Faculty_Name}}
+Origin Trivia Team`;
 
             const messageTemplate = customMessage || defaultBody;
 
             const body = messageTemplate
                 .replace(/{{student_name}}/g, student.name)
-                .replace(/{{quiz_title}}/g, quizDetails.title)
-                .replace(/{{subject}}/g, quizDetails.subject)
-                .replace(/{{branch}}/g, quizDetails.branch)
-                .replace(/{{year}}/g, quizDetails.year)
-                .replace(/{{semester}}/g, quizDetails.semester);
+                .replace(/{Student name}/g, student.name)
+                .replace(/{{Activity_Name}}/g, quizDetails.title)
+                .replace(/{{Subject}}/g, quizDetails.subject)
+                .replace(/{{Branch}}/g, quizDetails.branch)
+                .replace(/{{Year}}/g, quizDetails.year)
+                .replace(/{{Semester}}/g, quizDetails.semester)
+                .replace(/{{Publish_Date}}/g, quizDetails.publishDate || new Date().toLocaleDateString())
+                .replace(/{{Deadline}}/g, quizDetails.deadline || "No Deadline")
+                .replace(/{{Faculty_Name}}/g, quizDetails.facultyName || "Faculty");
 
             // Send Real Mail via SMTP (if configured)
             const isPlaceholderPass = process.env.EMAIL_PASS && process.env.EMAIL_PASS.includes('$6969$');
@@ -307,6 +339,22 @@ app.post('/api/notify', async (req, res) => {
     res.json({ success: true, results });
 });
 
-app.listen(port, () => {
-    console.log(`Compiler server listening at http://localhost:${port}`);
+try {
+    const server = app.listen(port, '0.0.0.0', () => {
+        console.log(`Compiler server listening at http://0.0.0.0:${port}`);
+    });
+
+    server.on('error', (e) => {
+        console.error("Server Error:", e);
+    });
+} catch (e) {
+    console.error("Failed to start server:", e);
+}
+
+// Global error handlers to prevent exit
+process.on('uncaughtException', (err) => {
+    console.error('Uncaught Exception:', err);
+});
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
 });

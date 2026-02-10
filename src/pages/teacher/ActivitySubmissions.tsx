@@ -17,7 +17,7 @@ import {
 } from "@/components/ui/table";
 import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Loader2, ArrowLeft, Eye, Download, FileSpreadsheet, Search } from 'lucide-react';
+import { Loader2, ArrowLeft, Eye, Download, FileSpreadsheet, Search, Mail } from 'lucide-react';
 import { format } from 'date-fns';
 
 const ActivitySubmissions = () => {
@@ -51,7 +51,7 @@ const ActivitySubmissions = () => {
 
     const downloadCSV = (rows: ReportRow[], filename: string) => {
         // Headers
-        let csvContent = "Student Name,Register Number,Branch,Semester,Email";
+        let csvContent = "Student Name,Register Number,SIN No,Branch,Semester,Email";
 
         if (activeTab === 'submitted') {
             csvContent += ",Submitted At,Total Marks";
@@ -63,10 +63,10 @@ const ActivitySubmissions = () => {
 
         // Rows
         rows.forEach(row => {
-            let line = `"${row.student.name}","${row.student.registerNumber}","${row.student.branch}","${row.student.semester}","${row.student.email}"`;
+            let line = `"${row.student.name}","${row.student.registerNumber}","${row.student.sinNo || ''}","${row.student.branch}","${row.student.semester}","${row.student.email}"`;
 
             if (activeTab === 'submitted') {
-                const date = row.submittedAt ? format(new Date(row.submittedAt), 'yyyy-MM-dd HH:mm:ss') : '-';
+                const date = row.submittedAt ? format(new Date(row.submittedAt), 'dd-MM-yyyy HH:mm:ss') : '-';
                 line += `,"${date}","${row.totalMarks || 0}"`;
 
                 questions.forEach(q => {
@@ -126,12 +126,99 @@ const ActivitySubmissions = () => {
                                 onClick={() => {
                                     const list = activeTab === 'submitted' ? filteredSubmitted : filteredNotSubmitted;
                                     const name = activeTab === 'submitted' ? 'submissions' : 'not_submitted';
-                                    downloadCSV(list, `${activity?.title}_${name}.csv`);
+                                    const safeTitle = (activity?.title || 'Activity').replace(/[^a-z0-9]/gi, '_');
+                                    const safeBranch = (activity?.target_branch || 'All').replace(/[^a-z0-9]/gi, '_');
+                                    // Requested format: "activity name and branch name"
+                                    downloadCSV(list, `${safeTitle} - ${safeBranch}.csv`);
                                 }}
                             >
                                 <FileSpreadsheet className="h-4 w-4" />
                                 Export CSV
                             </Button>
+                            {activeTab === 'not_submitted' && (
+                                <Button
+                                    variant="default"
+                                    size="sm"
+                                    className="gap-2 shrink-0"
+                                    onClick={async () => {
+                                        if (!activity || filteredNotSubmitted.length === 0) return;
+                                        const confirm = window.confirm(`Send reminder to ${filteredNotSubmitted.length} students?`);
+                                        if (!confirm) return;
+
+                                        try {
+                                            const recipients = filteredNotSubmitted.map(row => ({
+                                                email: row.student.email,
+                                                name: row.student.name,
+                                                student_id: row.userId
+                                            }));
+
+                                            const payload = {
+                                                recipients,
+                                                quizDetails: {
+                                                    title: activity.title,
+                                                    subject: activity.subjects?.name || 'General',
+                                                    branch: activity.target_branch || 'All',
+                                                    year: activity.target_year || 'All',
+                                                    semester: activity.target_semester || 'All',
+                                                    publishDate: activity.created_at ? format(new Date(activity.created_at), 'dd MMM yyyy') : '-',
+                                                    deadline: activity.deadline ? new Date(activity.deadline).toLocaleDateString('en-US', {
+                                                        day: 'numeric', month: 'short', year: 'numeric',
+                                                        hour: 'numeric', minute: '2-digit', hour12: true
+                                                    }) : 'No Deadline',
+                                                    facultyName: activity.profiles?.full_name || 'Faculty',
+                                                    link: `${window.location.origin}/student/activity/${activityId}`
+                                                },
+                                                customSubject: "Reminder: Activity Submission",
+                                                customMessage: `Hello {{Student_Name}},
+
+This is a reminder to submit your activity before the deadline.
+
+**Deadline:** {{Deadline}}
+
+---
+
+**Activity Details**
+
+Activity Name : {{Activity_Name}}
+Subject       : {{Subject}}
+Branch        : {{Branch}}
+Year          : {{Year}}
+Semester      : {{Semester}}
+Published On  : {{Publish_Date}}
+
+Please log in to the **Origin Trivia** platform and complete the activity within the given time.
+
+https://origin-trivia.netlify.app/              For any questions, please contact your faculty.
+
+Thank you.
+
+Best regards,
+{{Faculty_Name}}
+Origin Trivia Team`
+                                            };
+
+                                            const response = await fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001'}/api/notify`, {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify(payload)
+                                            });
+
+                                            const result = await response.json();
+                                            if (result.success) {
+                                                alert(`Reminders sent successfully to ${result.results?.success || 0} students.`);
+                                            } else {
+                                                alert('Failed to send reminders.');
+                                            }
+                                        } catch (error) {
+                                            console.error(error);
+                                            alert('An error occurred while sending reminders.');
+                                        }
+                                    }}
+                                >
+                                    <Mail className="h-4 w-4" />
+                                    Remind All ({filteredNotSubmitted.length})
+                                </Button>
+                            )}
                         </div>
                     </div>
 
@@ -151,48 +238,51 @@ const ActivitySubmissions = () => {
                                         <Table>
                                             <TableHeader>
                                                 <TableRow>
-                                                    <TableHead className="min-w-[150px]">Student</TableHead>
                                                     <TableHead>Register No</TableHead>
-                                                    <TableHead>Branch / Sem</TableHead>
-                                                    <TableHead>Submitted On</TableHead>
-                                                    <TableHead className="text-right font-bold">Total</TableHead>
+                                                    <TableHead>SIN No</TableHead>
+                                                    <TableHead className="min-w-[150px]">Student Name</TableHead>
+                                                    <TableHead>Email</TableHead>
                                                     {questions.map((q, i) => (
-                                                        <TableHead key={q.id} className="text-center min-w-[50px] text-xs">
+                                                        <TableHead key={q.id} className="text-center min-w-[50px] text-xs font-bold font-serif text-black">
                                                             Q{i + 1}<br />
-                                                            <span className="text-muted-foreground">({q.marks})</span>
+                                                            <span className="text-muted-foreground font-normal">({q.marks})</span>
                                                         </TableHead>
                                                     ))}
-                                                    <TableHead className="text-right">Actions</TableHead>
+                                                    <TableHead className="text-right font-bold">Total</TableHead>
+                                                    <TableHead>Submitted On</TableHead>
+                                                    <TableHead>Performance</TableHead>
                                                 </TableRow>
                                             </TableHeader>
                                             <TableBody>
                                                 {filteredSubmitted.map((row) => (
                                                     <TableRow key={row.submissionId}>
+                                                        <TableCell>{row.student.registerNumber}</TableCell>
+                                                        <TableCell>{row.student.sinNo || '-'}</TableCell>
                                                         <TableCell className="font-medium">
                                                             {row.student.name}
                                                         </TableCell>
-                                                        <TableCell>{row.student.registerNumber}</TableCell>
-                                                        <TableCell>
-                                                            <div className="flex flex-col text-xs">
-                                                                <span>{row.student.branch}</span>
-                                                                <span className="text-muted-foreground">{row.student.semester}</span>
-                                                            </div>
+                                                        <TableCell>{row.student.email}</TableCell>
+                                                        {questions.map(q => (
+                                                            <TableCell key={q.id} className="text-center text-xs font-serif">
+                                                                {row.questionMarks?.[q.id] ?? '-'}
+                                                            </TableCell>
+                                                        ))}
+                                                        <TableCell className="text-right font-bold">
+                                                            {row.totalMarks} / {activity?.total_marks}
                                                         </TableCell>
                                                         <TableCell className="text-xs whitespace-nowrap">
                                                             {row.submittedAt ? format(new Date(row.submittedAt), 'MMM d, h:mm a') : '-'}
                                                         </TableCell>
-                                                        <TableCell className="text-right font-bold">
-                                                            {row.totalMarks} / {activity?.total_marks}
-                                                        </TableCell>
-                                                        {questions.map(q => (
-                                                            <TableCell key={q.id} className="text-center text-xs">
-                                                                {row.questionMarks?.[q.id] ?? '-'}
-                                                            </TableCell>
-                                                        ))}
-                                                        <TableCell className="text-right">
-                                                            <Button size="sm" variant="ghost" className="h-8 w-8 p-0">
-                                                                <Eye className="h-4 w-4" />
-                                                            </Button>
+                                                        <TableCell>
+                                                            {(() => {
+                                                                if (!activity?.total_marks) return '-';
+                                                                const percentage = (row.totalMarks || 0) / activity.total_marks * 100;
+                                                                if (percentage >= 90) return <span className="text-green-600 font-bold">Outstanding</span>;
+                                                                if (percentage >= 80) return <span className="text-green-500 font-semibold">Excellent</span>;
+                                                                if (percentage >= 70) return <span className="text-blue-500">Good</span>;
+                                                                if (percentage >= 50) return <span className="text-yellow-600">Average</span>;
+                                                                return <span className="text-red-500">Poor</span>;
+                                                            })()}
                                                         </TableCell>
                                                     </TableRow>
                                                 ))}
@@ -221,6 +311,7 @@ const ActivitySubmissions = () => {
                                             <TableRow>
                                                 <TableHead>Student Name</TableHead>
                                                 <TableHead>Register No</TableHead>
+                                                <TableHead>SIN No</TableHead>
                                                 <TableHead>Branch</TableHead>
                                                 <TableHead>Semester</TableHead>
                                                 <TableHead>Email</TableHead>
@@ -232,6 +323,7 @@ const ActivitySubmissions = () => {
                                                 <TableRow key={row.userId}>
                                                     <TableCell className="font-medium">{row.student.name}</TableCell>
                                                     <TableCell>{row.student.registerNumber}</TableCell>
+                                                    <TableCell>{row.student.sinNo || '-'}</TableCell>
                                                     <TableCell>{row.student.branch}</TableCell>
                                                     <TableCell>{row.student.semester}</TableCell>
                                                     <TableCell>{row.student.email}</TableCell>

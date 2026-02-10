@@ -107,15 +107,50 @@ export const useActivities = (subjectId?: string) => {
 
       // Client-side filtering for students based on branch AND year/semester
       if (role === 'student' && profile) {
+        console.log("Filtering activities for student:", profile.full_name, profile.branch, profile.semester);
+
+        const normalize = (str: string | undefined | null) => str ? str.toLowerCase().replace(/\s+/g, '').trim() : '';
+
         activitiesData = activitiesData.filter(act => {
           // Branch Filter
-          const branchMatch = !act.target_branch || act.target_branch === 'All' || act.target_branch === profile.branch;
+          const actBranch = normalize(act.target_branch);
+          const userBranch = normalize(profile.branch);
+
+          const branchMatch = !act.target_branch || act.target_branch === 'All' || actBranch === 'all' || actBranch === userBranch;
 
           // Year/Semester Filter
-          // Reconstruct the "(Y/S)" format from activity fields to compare with profile.semester which is stored as "(Y/S)"
-          const activitySemString = `(${act.target_year}/${act.target_semester})`;
-          const yearSemMatch = (!act.target_year || act.target_year === 'All') ||
-            (profile.semester === activitySemString);
+          // Reconstruct the "(Y/S)" format or just match numbers if possible.
+          // We'll normalize by stripping non-alphanumeric chars (except maybe numbers)
+          // Actually simplest is to just check if the "Semester" part matches.
+          // profile.semester is e.g. "(1/1)" 
+          // act.target_year="1", act.target_semester="1"
+
+          let activitySemString = 'All';
+          if (act.target_year && act.target_year !== 'All') {
+            // Create "(1/1)" style string for comparison
+            activitySemString = `(${act.target_year}/${act.target_semester})`;
+          }
+
+          // Normalize both sides by removing () and spaces
+          const normUserSem = normalize(profile.semester?.replace(/[()]/g, ''));
+          const normActSem = normalize(activitySemString.replace(/[()]/g, ''));
+
+          const yearSemMatch = activitySemString === 'All' || normActSem === 'all' || normUserSem === normActSem;
+
+          // Debug Log
+          if (!branchMatch || !yearSemMatch) {
+            console.log(`[Activity Filter] Hiding "${act.title}":`, {
+              reason: !branchMatch ? 'Branch Mismatch' : 'Sem Mismatch',
+              userBranch: profile.branch,
+              actBranch: act.target_branch,
+              normUserBranch: userBranch,
+              normActBranch: actBranch,
+              userSem: profile.semester,
+              actSem: activitySemString,
+              normUserSem: normUserSem,
+              normActSem: normActSem
+            });
+          }
 
           return branchMatch && yearSemMatch;
         });
@@ -312,6 +347,51 @@ export const useActivities = (subjectId?: string) => {
     }
   });
 
+  // Duplicate activity
+  const duplicateActivity = useMutation({
+    mutationFn: async (originalId: string) => {
+      // 1. Get original activity
+      const originalActivitySnap = await getDoc(doc(db, 'activities', originalId));
+      if (!originalActivitySnap.exists()) throw new Error("Activity not found");
+      const originalData = originalActivitySnap.data() as Activity;
+
+      // 2. Get original questions
+      const questionsSnap = await getDocs(collection(db, 'activities', originalId, 'questions'));
+
+      // 3. Create new Activity
+      const newActivityRef = await addDoc(collection(db, 'activities'), {
+        ...originalData,
+        title: `Copy of ${originalData.title}`,
+        is_published: false, // Always draft
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        publish_date: null,
+        deadline: null // Optional: clear deadline or keep it? Keeping it might be useful, but risky. Let's keep it but user can edit. 
+        // Actually better to clear deadline to avoid confusion with old dates.
+      });
+
+      // 4. Batch create questions
+      const batch = writeBatch(db);
+      questionsSnap.docs.forEach(qDoc => {
+        const qData = qDoc.data();
+        const newQRef = doc(collection(db, 'activities', newActivityRef.id, 'questions'));
+
+        batch.set(newQRef, {
+          ...qData,
+          activity_id: newActivityRef.id,
+          id: newQRef.id, // Ensure ID matches doc ID if stored in field
+          created_at: new Date().toISOString()
+        });
+      });
+
+      await batch.commit();
+      return newActivityRef.id;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['activities'] });
+    }
+  });
+
   return {
     activities,
     isLoading,
@@ -320,6 +400,7 @@ export const useActivities = (subjectId?: string) => {
     updateActivity,
     updateActivityWithQuestions,
     deleteActivity,
+    duplicateActivity, // Exported
   };
 };
 

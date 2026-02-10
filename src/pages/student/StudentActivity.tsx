@@ -106,6 +106,56 @@ const StudentActivity = () => {
 
 
 
+  // Reconstruct code from templates and answers
+  const constructCode = (questionId: string) => {
+    const question = activity?.questions?.find((q: any) => q.id === questionId);
+    if (!question) return '';
+
+    const answer = answers[questionId];
+    if (!answer) return '';
+
+    // Error Correction / Output Prediction / Trace: Answer is usually text or simple code
+    // But for Error Correction specifically, the answer IS the code.
+    if (['error_correction', 'code_completion'].includes(question.question_type)) {
+      // Check if it's code completion with blanks
+      if (question.question_type === 'code_completion' && question.blanks && question.blanks.length > 0) {
+        try {
+          const studentAnswers = JSON.parse(answer);
+          const splitRegex = /({{.*?}})/g;
+          const segments = question.code_template?.split(splitRegex) || [];
+          let blankIndex = 0;
+
+          return segments.map((segment: string) => {
+            if (segment.match(/{{.*?}}/)) {
+              const blank = question.blanks[blankIndex];
+              blankIndex++;
+              if (blank && studentAnswers[blank.id]) {
+                return studentAnswers[blank.id];
+              }
+              return ' '; // Empty blank if not filled, might cause compiler error which is expected
+            }
+            return segment;
+          }).join('');
+        } catch (e) {
+          console.error("Failed to parse answers for run code", e);
+          return '';
+        }
+      }
+
+      // Default fallback (Error Correction or Code Completion without blanks)
+      // For Error Correction, the answer is the full corrected code.
+      // For simple Code Completion, answer is full code.
+      return answer;
+    }
+
+    // For Output Prediction, we run the TEMPLATE, not the answer (Answer is the predicted output).
+    if (question.question_type === 'output_prediction') {
+      return question.code_template || '';
+    }
+
+    return '';
+  };
+
   const evaluateObjectiveQuestion = (question: any, answer: string) => {
     let isCorrect = false;
     let score = 0;
@@ -135,10 +185,39 @@ const StudentActivity = () => {
       case 'fill_blanks':
       case 'short_answer': // If not AI
       case 'code_completion':
+        // Handle Blanks (JSON answer)
+        if (question.blanks && question.blanks.length > 0) {
+          let studentAnswers: Record<string, string> = {};
+          try { studentAnswers = JSON.parse(answer); } catch (e) { console.error("Failed to parse code completion answer", e); }
+
+          let totalScore = 0;
+          let allCorrect = true;
+
+          question.blanks.forEach((blank: any) => {
+            const val = (studentAnswers[blank.id] || '').trim();
+            // Exact match
+            if (blank.correct_answers.some((ca: string) => ca.trim() === val)) {
+              totalScore += (blank.marks || 0);
+            } else {
+              allCorrect = false;
+            }
+          });
+
+          isCorrect = allCorrect;
+          score = totalScore;
+        } else {
+          // Exact code match (fallback)
+          isCorrect = answer.trim() === (question.correct_answer || '').trim();
+          if (isCorrect) score = maxMarks;
+        }
+        break;
+
+      case 'short_answer': // If not AI
       case 'output_prediction':
       case 'error_identification':
       case 'error_correction':
       case 'numerical':
+      case 'concept_identification':
         // Exact string match (case insensitive? User said exact, but trimming is usually expected)
         // For fill_blanks, teacher might provide multiple comma-sep correct answers
         if (question.question_type === 'fill_blanks' && question.correct_answer.includes(',')) {
@@ -150,12 +229,8 @@ const StudentActivity = () => {
         } else {
           // Strict equality for code/others
           isCorrect = answer.trim() === (question.correct_answer || '').trim();
-          // Special case: code_completion might rely on template holes, but simplistically we match final code or specific lines?
-          // If the question has `correct_answer` field, we use it.
-          // If code_completion is just "run and verify", auto-grading might be harder without specific output check.
-          // Assuming teacher put the EXPECTED CODE in `correct_answer` or `model_answer`.
-          // If `correct_answer` is present, we use it.
         }
+        if (isCorrect) score = maxMarks;
         break;
 
       default:
@@ -245,8 +320,8 @@ const StudentActivity = () => {
         return {
           question_id: q.id,
           answer_text: answer,
-          score: aiResult.score,     // Pass to hook if it accepts it in mutation vars (need to verify hook)
-          feedback: aiResult.feedback
+          score: (aiResult.score !== undefined) ? aiResult.score : evaluateObjectiveQuestion(q, answer)?.score,
+          feedback: aiResult.feedback || evaluateObjectiveQuestion(q, answer)?.feedback
         };
       });
 
@@ -272,9 +347,9 @@ const StudentActivity = () => {
   };
 
   const handleRunCode = async (questionId: string) => {
-    const code = answers[questionId];
+    const code = constructCode(questionId);
     if (!code) {
-      toast({ title: 'No code', description: 'Please write some code to run.', variant: 'destructive' });
+      toast({ title: 'No code', description: 'Please complete the code to run.', variant: 'destructive' });
       return;
     }
 
@@ -299,6 +374,56 @@ const StudentActivity = () => {
         ...compileOutput,
         [questionId]: { output: '', error: 'Failed to connect to compiler server.' }
       });
+    } finally {
+      setCompiling({ ...compiling, [questionId]: false });
+    }
+  };
+
+  const checkOutputPrediction = async (questionId: string) => {
+    const code = constructCode(questionId); // This gets the TEMPLATE for prediction
+    const studentPrediction = answers[questionId];
+
+    if (!studentPrediction) {
+      toast({ title: 'No prediction', description: 'Please enter your output prediction.', variant: 'destructive' });
+      return;
+    }
+
+    setCompiling({ ...compiling, [questionId]: true });
+    setCompileOutput({ ...compileOutput, [questionId]: { output: '', error: '' } });
+
+    try {
+      const response = await fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001'}/api/compile`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code }),
+      });
+
+      const data = await response.json();
+
+      // Compare output
+      const actualOutput = (data.output || '').trim();
+      const predicted = studentPrediction.trim();
+
+      // Simple exact match (case insensitive? usually output is case sensitive but let's be strict for now or adhere to question settings if we had them)
+      // Let's go with exact trim match.
+      const isMatch = actualOutput === predicted;
+
+      if (isMatch) {
+        setCompileOutput({
+          ...compileOutput,
+          [questionId]: { output: 'Correct! The actual output matches your prediction.', error: '' }
+        });
+        toast({ title: 'Correct!', description: 'Your prediction matches the code output.', className: 'bg-green-100 border-green-500 text-green-900' });
+      } else {
+        setCompileOutput({
+          ...compileOutput,
+          [questionId]: { output: '', error: 'Incorrect. The actual output does NOT match your prediction.' }
+        });
+        toast({ title: 'Incorrect', description: 'Your prediction does not match.', variant: 'destructive' });
+      }
+
+    } catch (error: any) {
+      toast({ title: 'Execution Failed', description: 'Could not run code to verify prediction.', variant: 'destructive' });
     } finally {
       setCompiling({ ...compiling, [questionId]: false });
     }
@@ -379,6 +504,62 @@ const StudentActivity = () => {
           </Select>
         );
       case 'code_completion':
+        if (question.blanks && question.blanks.length > 0) {
+          // Render Blanks Interleaved
+          const splitRegex = /({{.*?}})/g;
+          const segments = question.code_template?.split(splitRegex) || [];
+          let blankIndex = 0;
+          const allAnswers = answers[question.id] ? JSON.parse(answers[question.id] || '{}') : {};
+
+          return (
+            <div className="space-y-3">
+              <div className="p-4 rounded-lg bg-muted/50 text-sm overflow-x-auto font-mono leading-loose whitespace-pre-wrap">
+                {segments.map((segment: string, i: number) => {
+                  if (segment.match(/{{.*?}}/)) {
+                    const currentBlank = question.blanks[blankIndex];
+                    blankIndex++;
+                    if (!currentBlank) return <span key={i} className="text-destructive">?</span>;
+
+                    const val = allAnswers[currentBlank.id] || '';
+                    return (
+                      <Input
+                        key={currentBlank.id}
+                        className="inline-flex w-32 h-7 mx-1 min-w-[80px] text-center px-1 border-primary/50 focus:border-primary"
+                        value={val}
+                        onChange={(e) => {
+                          const newAns = { ...allAnswers, [currentBlank.id]: e.target.value };
+                          setAnswers({ ...answers, [question.id]: JSON.stringify(newAns) });
+                        }}
+                        disabled={disabled}
+                        placeholder={`(${currentBlank.marks} Marks)`}
+                      />
+                    );
+                  }
+                  return <span key={i}>{segment}</span>;
+                })}
+              </div>
+
+              <div className="flex justify-end mt-2">
+                <Button size="sm" variant="secondary" onClick={() => handleRunCode(question.id)} disabled={compiling[question.id] || disabled}>
+                  {compiling[question.id] ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Terminal className="h-3 w-3 mr-1" />}
+                  Run Code
+                </Button>
+              </div>
+
+              {(compileOutput[question.id]?.output || compileOutput[question.id]?.error) && (
+                <div className="mt-2 text-sm">
+                  <Label className="text-xs text-muted-foreground">Console Output:</Label>
+                  <div className="bg-black text-white p-3 rounded-md font-mono whitespace-pre-wrap mt-1">
+                    {compileOutput[question.id]?.error && <span className="text-red-400">{compileOutput[question.id].error}</span>}
+                    {compileOutput[question.id]?.output}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+
+        }
+        // Fallback for simple code completion (entire block)
         return (
           <div className="space-y-3">
             {question.code_template && <pre className="p-4 rounded-lg bg-muted text-sm overflow-x-auto font-mono">{question.code_template}</pre>}
@@ -411,17 +592,16 @@ const StudentActivity = () => {
               <Input placeholder="Enter output..." value={val} onChange={(e) => setAnswers({ ...answers, [question.id]: e.target.value })} disabled={disabled} className="font-mono" />
             </div>
             <div className="flex justify-end">
-              <Button size="sm" variant="secondary" onClick={() => handleRunCode(question.id)} disabled={compiling[question.id] || disabled}>
+              <Button size="sm" variant="secondary" onClick={() => checkOutputPrediction(question.id)} disabled={compiling[question.id] || disabled}>
                 {compiling[question.id] ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Terminal className="h-3 w-3 mr-1" />}
-                Test Code (Run)
+                Check Prediction
               </Button>
             </div>
             {(compileOutput[question.id]?.output || compileOutput[question.id]?.error) && (
               <div className="mt-2 text-sm">
-                <Label className="text-xs text-muted-foreground">Actual Code Output:</Label>
-                <div className="bg-black text-white p-3 rounded-md font-mono whitespace-pre-wrap mt-1">
-                  {compileOutput[question.id]?.error && <span className="text-red-400">{compileOutput[question.id].error}</span>}
-                  {compileOutput[question.id]?.output}
+                <Label className="text-xs text-muted-foreground">Verification Result:</Label>
+                <div className={`p-3 rounded-md font-medium mt-1 ${compileOutput[question.id]?.error ? 'bg-red-100 text-red-900' : 'bg-green-100 text-green-900'}`}>
+                  {compileOutput[question.id]?.error || compileOutput[question.id]?.output}
                 </div>
               </div>
             )}
@@ -460,22 +640,29 @@ const StudentActivity = () => {
             <Label className="text-xs text-muted-foreground">Correct the following code:</Label>
             {question.faulty_code && <pre className="p-4 rounded-lg bg-muted text-sm overflow-x-auto font-mono border border-destructive/20">{question.faulty_code}</pre>}
             <Textarea placeholder="Write the corrected code..." value={val} onChange={(e) => setAnswers({ ...answers, [question.id]: e.target.value })} disabled={disabled} className="font-mono" rows={5} />
+            <div className="flex justify-end">
+              <Button size="sm" variant="secondary" onClick={() => handleRunCode(question.id)} disabled={compiling[question.id] || disabled}>
+                {compiling[question.id] ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Terminal className="h-3 w-3 mr-1" />}
+                Run Code
+              </Button>
+            </div>
+            {(compileOutput[question.id]?.output || compileOutput[question.id]?.error) && (
+              <div className="mt-2 text-sm">
+                <Label className="text-xs text-muted-foreground">Console Output:</Label>
+                <div className="bg-black text-white p-3 rounded-md font-mono whitespace-pre-wrap mt-1">
+                  {compileOutput[question.id]?.error && <span className="text-red-400">{compileOutput[question.id].error}</span>}
+                  {compileOutput[question.id]?.output}
+                </div>
+              </div>
+            )}
           </div>
         );
       case 'concept_identification':
-        // Assuming options are provided via question_options like checkbox
         return (
-          <div className="space-y-2">
-            <Label className="text-xs text-muted-foreground">Select all applicable concepts:</Label>
-            {question.question_options?.map((opt: any) => {
-              const isChecked = (answers[question.id] || '').split(',').includes(opt.id);
-              return (
-                <div key={opt.id} className="flex items-center space-x-2">
-                  <input type="checkbox" id={opt.id} checked={isChecked} onChange={(e) => handleCheckboxChange(question.id, opt.id, e.target.checked)} disabled={disabled} className="h-4 w-4" />
-                  <Label htmlFor={opt.id} className="cursor-pointer flex-1">{opt.option_text}</Label>
-                </div>
-              );
-            })}
+          <div className="space-y-3">
+            <Label className="text-xs text-muted-foreground">Identify the concept in this code:</Label>
+            {question.code_template && <pre className="p-4 rounded-lg bg-muted text-sm overflow-x-auto font-mono border">{question.code_template}</pre>}
+            <Input placeholder="Enter the concept name..." value={val} onChange={(e) => setAnswers({ ...answers, [question.id]: e.target.value })} disabled={disabled} />
           </div>
         );
       default: // short_answer, fill_blanks, etc.

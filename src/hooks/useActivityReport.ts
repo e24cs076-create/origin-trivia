@@ -8,6 +8,7 @@ export interface ReportRow {
     student: {
         name: string;
         registerNumber: string;
+        sinNo?: string;
         branch: string;
         semester: string;
         email: string;
@@ -84,8 +85,9 @@ export const useActivityReport = (activityId?: string) => {
                 const marks: Record<string, number> = {};
                 answersQ.forEach(ansDoc => {
                     const ans = ansDoc.data();
-                    if (ans.question_id && typeof ans.score === 'number') {
-                        marks[ans.question_id] = ans.score;
+                    const score = Number(ans.score);
+                    if (ans.question_id && !isNaN(score)) {
+                        marks[ans.question_id] = score;
                     }
                 });
                 submissionAnswersMap[sub.id] = marks;
@@ -106,6 +108,7 @@ export const useActivityReport = (activityId?: string) => {
                     student: {
                         name: student?.full_name || 'Unknown User',
                         registerNumber: student?.register_number || 'N/A',
+                        sinNo: student?.sin_no || '', // Fix: Access sin_no from DB
                         branch: student?.branch || 'N/A',
                         semester: student?.semester || 'N/A',
                         email: student?.email || 'N/A'
@@ -113,7 +116,7 @@ export const useActivityReport = (activityId?: string) => {
                     submissionStatus: 'submitted',
                     submissionId: sub.id,
                     submittedAt: sub.submitted_at,
-                    totalMarks: sub.obtained_marks ?? sub.total_score ?? 0,
+                    totalMarks: Object.values(submissionAnswersMap[sub.id] || {}).reduce((a, b) => a + b, 0),
                     questionMarks: submissionAnswersMap[sub.id] || {}
                 });
             });
@@ -127,6 +130,7 @@ export const useActivityReport = (activityId?: string) => {
                         student: {
                             name: student.full_name,
                             registerNumber: student.register_number || '-',
+                            sinNo: student.sin_no || '-',
                             branch: student.branch || '-',
                             semester: student.semester || '-',
                             email: student.email || '-'

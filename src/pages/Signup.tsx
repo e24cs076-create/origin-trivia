@@ -180,7 +180,12 @@ const Signup = () => {
                       id="registerNumber"
                       placeholder="e.g. 7327241040XX"
                       value={registerNumber}
-                      onChange={(e) => setRegisterNumber(e.target.value)}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        if (/^\d*$/.test(val)) {
+                          setRegisterNumber(val);
+                        }
+                      }}
                       required
                       disabled={loading}
                     />

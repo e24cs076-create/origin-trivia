@@ -32,6 +32,8 @@ import {
   Loader2,
   Search,
   Mail,
+  Send,
+  Copy,
 } from 'lucide-react';
 import {
   DropdownMenu,
@@ -83,20 +85,11 @@ const TeacherDashboard = () => {
   const [selectedSubject, setSelectedSubject] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
 
-  const { activities, isLoading: activitiesLoading, deleteActivity } = useActivities(
+  const { activities, isLoading: activitiesLoading, deleteActivity, updateActivity, duplicateActivity } = useActivities(
     selectedSubject === 'all' ? undefined : selectedSubject
   );
   const { subjects, isLoading: subjectsLoading } = useSubjects();
   const { submissions } = useSubmissions();
-
-  // --- Notification Logic ---
-  const [isNotifyOpen, setIsNotifyOpen] = useState(false);
-  const [notifyBranch, setNotifyBranch] = useState('All');
-  const [notifyYearSem, setNotifyYearSem] = useState('All');
-  const [notifyEmails, setNotifyEmails] = useState('');
-  const [notifyMessage, setNotifyMessage] = useState('');
-  const [isFetchingEmails, setIsFetchingEmails] = useState(false);
-  const [isSending, setIsSending] = useState(false);
 
   useEffect(() => {
     if (!authLoading && (!user || role !== 'teacher')) {
@@ -128,105 +121,29 @@ const TeacherDashboard = () => {
     }
   };
 
-
-
-  const handleFetchEmails = async () => {
-    if (notifyBranch === 'All' && notifyYearSem === 'All') {
-      alert('Please select a specific Branch or Year/Semester to fetch emails.');
-      return;
-    }
-
-    setIsFetchingEmails(true);
-    try {
-      // Parse Year/Sem
-      let targetYear = '';
-      let targetSem = '';
-      if (notifyYearSem !== 'All') {
-        const match = notifyYearSem.match(/\((\d+)\/(\d+)\)/);
-        if (match) {
-          targetYear = match[1];
-          targetSem = match[2];
-        }
+  const handlePublish = async (id: string, title: string) => {
+    if (confirm(`Are you sure you want to publish "${title}"? It will be visible to students immediately.`)) {
+      try {
+        updateActivity.mutate({ id, is_published: true });
+      } catch (e) {
+        console.error(e);
+        alert("Failed to publish.");
       }
-
-      let q = query(collection(db, 'email_recipients'), where('is_active', '==', true));
-      if (notifyBranch !== 'All') q = query(q, where('branch', '==', notifyBranch));
-      // Only filter by year/sem if parsed successfully
-      if (targetYear && targetSem) {
-        q = query(q, where('year', '==', targetYear), where('semester', '==', targetSem));
-      }
-
-      const querySnapshot = await getDocs(q);
-      const emails: string[] = [];
-      querySnapshot.forEach((doc) => {
-        const data = doc.data();
-        if (data.email) emails.push(data.email);
-      });
-
-      if (emails.length === 0) {
-        alert('No recipients matched the selected criteria in the Email Setup list.');
-      } else {
-        const current = notifyEmails ? notifyEmails.split(',').map(e => e.trim()).filter(Boolean) : [];
-        const newSet = new Set([...current, ...emails]);
-        setNotifyEmails(Array.from(newSet).join(', '));
-      }
-    } catch (e) {
-      console.error(e);
-      alert('Failed to fetch emails.');
-    } finally {
-      setIsFetchingEmails(false);
     }
   };
 
-  const handleSendNotification = async () => {
-    if (!notifyEmails.trim()) {
-      alert('Please add at least one recipient email.');
-      return;
-    }
-
-    setIsSending(true);
-    try {
-      const emailList = notifyEmails.split(',').map(e => e.trim()).filter(Boolean);
-      const recipients = emailList.map(email => ({ email, name: 'Student' }));
-
-      // Call API
-      const response = await fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001'}/api/notify`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          recipients,
-          quizDetails: {
-            title: 'Teacher Notification',
-            subject: 'General',
-            branch: notifyBranch,
-            year: notifyYearSem,
-            semester: '',
-            link: '#'
-          },
-          // Assuming we have a notifyMessage state, or fallback
-          customMessage: typeof notifyMessage !== 'undefined' ? notifyMessage : undefined,
-          customSubject: 'Important Announcement from Teacher'
-        })
-      });
-
-      const result = await response.json();
-
-      if (result.success) {
-        alert(`Notification sent to ${result.results?.success || 0} students.`);
-        setIsNotifyOpen(false);
-        setNotifyEmails('');
-        if (typeof setNotifyMessage === 'function') setNotifyMessage('');
-      } else {
-        throw new Error(result.message || 'Server error');
+  const handleDuplicate = async (id: string, title: string) => {
+    if (confirm(`Duplicate "${title}"? This will create a new draft copy.`)) {
+      try {
+        await duplicateActivity.mutateAsync(id);
+        alert("Activity duplicated successfully!");
+      } catch (e) {
+        console.error(e);
+        alert("Failed to duplicate activity.");
       }
-
-    } catch (e) {
-      console.error(e);
-      alert('Failed to process notification.');
-    } finally {
-      setIsSending(false);
     }
   };
+
 
   return (
     <div className="min-h-screen bg-background">
@@ -246,82 +163,6 @@ const TeacherDashboard = () => {
                 Email Setup
               </Button>
             </Link>
-            <Link to="/teacher/email-logs">
-              <Button variant="outline" className="gap-2">
-                <FileText className="h-4 w-4" />
-                Delivery Logs
-              </Button>
-            </Link>
-            <Dialog open={isNotifyOpen} onOpenChange={setIsNotifyOpen}>
-              <DialogTrigger asChild>
-                <Button variant="outline" className="gap-2">
-                  <Users className="h-4 w-4" />
-                  Notify Students
-                </Button>
-              </DialogTrigger>
-              <DialogContent className="sm:max-w-[500px]">
-                <DialogHeader>
-                  <DialogTitle>Setup Notification</DialogTitle>
-                  <DialogDescription>
-                    Configure email notification for a group of students.
-                  </DialogDescription>
-                </DialogHeader>
-                <div className="grid gap-4 py-4">
-                  <div className="flex gap-2">
-                    <div className="grid flex-1 gap-2">
-                      <Select value={notifyBranch} onValueChange={(val) => setNotifyBranch(val)}>
-                        <SelectTrigger><SelectValue placeholder="Branch" /></SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="All">Any Branch</SelectItem>
-                          <SelectItem value="B.E-Computer Science & Engineering">B.E-Computer Science & Engineering</SelectItem>
-                          <SelectItem value="B.E-CSE (Cyber Security)">B.E-CSE (Cyber Security)</SelectItem>
-                          <SelectItem value="B.E-Biomedical Engineering">B.E-Biomedical Engineering</SelectItem>
-                          <SelectItem value="B.E- Electronics & Communication Engineering">B.E- Electronics & Communication Engineering</SelectItem>
-                          <SelectItem value="B.E-Mechanical Engineering">B.E-Mechanical Engineering</SelectItem>
-                          <SelectItem value="B.Tech - Artificial Intelligence & Data Science">B.Tech - Artificial Intelligence & Data Science</SelectItem>
-                          <SelectItem value="B.Tech - Information Technology">B.Tech - Information Technology</SelectItem>
-                          <SelectItem value="B.Tech - Agricultural Engineering">B.Tech - Agricultural Engineering</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div className="grid flex-1 gap-2">
-                      <Select value={notifyYearSem} onValueChange={setNotifyYearSem}>
-                        <SelectTrigger><SelectValue placeholder="Year/Sem" /></SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="All">Any Year/Sem</SelectItem>
-                          <SelectItem value="(1/1)">(1/1)</SelectItem>
-                          <SelectItem value="(1/2)">(1/2)</SelectItem>
-                          <SelectItem value="(2/3)">(2/3)</SelectItem>
-                          <SelectItem value="(2/4)">(2/4)</SelectItem>
-                          <SelectItem value="(3/5)">(3/5)</SelectItem>
-                          <SelectItem value="(3/6)">(3/6)</SelectItem>
-                          <SelectItem value="(4/7)">(4/7)</SelectItem>
-                          <SelectItem value="(4/8)">(4/8)</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  </div>
-                  <Button type="button" variant="secondary" onClick={handleFetchEmails} disabled={isFetchingEmails}>
-                    {isFetchingEmails && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                    Fetch Student Emails
-                  </Button>
-                  <div className="grid gap-2">
-                    <Textarea
-                      placeholder="Recipient emails..."
-                      value={notifyEmails}
-                      onChange={(e) => setNotifyEmails(e.target.value)}
-                      className="min-h-[100px]"
-                    />
-                  </div>
-                </div>
-                <DialogFooter>
-                  <Button type="button" onClick={handleSendNotification} disabled={isSending}>
-                    {isSending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                    Setup Notification
-                  </Button>
-                </DialogFooter>
-              </DialogContent>
-            </Dialog>
 
             <Link to="/teacher/create">
               <Button className="gap-2">
@@ -446,6 +287,19 @@ const TeacherDashboard = () => {
                           <Edit className="mr-2 h-4 w-4" />
                           Edit Activity
                         </DropdownMenuItem>
+
+                        <DropdownMenuItem onClick={() => handleDuplicate(activity.id, activity.title)}>
+                          <Copy className="mr-2 h-4 w-4" />
+                          Duplicate
+                        </DropdownMenuItem>
+
+                        {!activity.is_published && (
+                          <DropdownMenuItem onClick={() => handlePublish(activity.id, activity.title)}>
+                            <Send className="mr-2 h-4 w-4" />
+                            Publish Now
+                          </DropdownMenuItem>
+                        )}
+
                         <DropdownMenuItem
                           onClick={() => handleDelete(activity.id)}
                           className="text-destructive"

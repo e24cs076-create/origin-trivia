@@ -36,6 +36,7 @@ import {
   Hash,
   Bot,
   Users,
+  RefreshCw,
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 
@@ -104,6 +105,12 @@ const CreateActivity = () => {
 
   const [isPublished, setIsPublished] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  // Deadline 12h format state
+  const [datePart, setDatePart] = useState('');
+  const [hourPart, setHourPart] = useState('12');
+  const [minutePart, setMinutePart] = useState('00');
+  const [ampmPart, setAmpmPart] = useState('AM');
 
   // Structure: Sections -> Questions
   const [sections, setSections] = useState<SectionForm[]>([
@@ -233,17 +240,57 @@ const CreateActivity = () => {
     }));
   };
 
-  const removeOption = (questionId: string, optionId: string) => {
-    setQuestions(questions.map(q => {
-      if (q.id === questionId) {
-        return {
-          ...q,
-          options: q.options.filter(o => o.id !== optionId)
-        };
+  // --- Blanks Extraction ---
+  const extractBlanks = (questionId: string, code: string) => {
+    // Regex to find {{...}}
+    const regex = /{{(.*?)}}/g;
+    let match;
+    const newBlanks: { id: string; place_holder: string; correct_answers: string[]; marks: number }[] = [];
+
+    // Maintain existing blanks if possible to preserve marks? 
+    // For simplicity, we regenerate. User can adjust marks.
+    // If we want to be smarter, we could map by answer text, but duplicate answers make it tricky.
+
+    // We will use the question's default marks_per_blank if set, else 2.
+    const q = questions.find(q => q.id === questionId);
+    const defaultMarks = q?.marks_per_blank || 2;
+
+    while ((match = regex.exec(code)) !== null) {
+      const answer = match[1].trim();
+      if (answer) {
+        newBlanks.push({
+          id: crypto.randomUUID(),
+          place_holder: `Blank ${newBlanks.length + 1}`,
+          correct_answers: [answer],
+          marks: defaultMarks
+        });
       }
-      return q;
-    }));
+    }
+
+    if (newBlanks.length === 0) {
+      toast({ title: 'No blanks found', description: 'Use {{answer}} syntax in the code to define blanks.', variant: 'default' });
+    } else {
+      toast({ title: 'Blanks Extracted', description: `Found ${newBlanks.length} blanks.` });
+    }
+
+    const totalBlankMarks = newBlanks.reduce((sum, b) => sum + b.marks, 0);
+
+    updateQuestion(questionId, {
+      blanks: newBlanks,
+      marks: totalBlankMarks > 0 ? totalBlankMarks : (q?.marks || 0)
+    });
   };
+
+  const updateBlank = (questionId: string, blankId: string, updates: Partial<{ marks: number; correct_answers: string[] }>) => {
+    const q = questions.find(q => q.id === questionId);
+    if (!q || !q.blanks) return;
+
+    const newBlanks = q.blanks.map(b => b.id === blankId ? { ...b, ...updates } : b);
+    const totalMarks = newBlanks.reduce((sum, b) => sum + b.marks, 0);
+
+    updateQuestion(questionId, { blanks: newBlanks, marks: totalMarks });
+  };
+
 
   // --- Submission ---
   // Replaced explicit email Fetch state variable usage with direct access in Notification Setup area or on-change
@@ -253,60 +300,68 @@ const CreateActivity = () => {
   // We can just use targetBranch and targetYearSemester for fetching emails to ensure consistency
   // But the requirement says "Select Branch (dropdown)...". It makes sense to auto-sync with the Activity settings
 
+  const getRecipientsFromDB = async (branch: string, yearSem: string) => {
+    // NOTE: We connect to 'users' collection because 'email_recipients' is empty/unused.
+    console.log(`[getRecipientsFromDB] Querying users. Target Branch: '${branch}', Target Sem: '${yearSem}'`);
+
+    const q = query(collection(db, 'users'), where('role', '==', 'student'));
+    const snapshot = await getDocs(q);
+
+    const list: { email: string; name: string; id: string }[] = [];
+    const normalize = (str: string | undefined | null) => str ? str.toLowerCase().replace(/\s+/g, '').trim() : '';
+
+    snapshot.forEach(doc => {
+      const data = doc.data();
+      if (!data.email) return;
+
+      // Robust Filtering Logic (Matching StudentDashboard/useActivities)
+
+      // Branch Check
+      const userBranch = normalize(data.branch);
+      const targetBranchNorm = normalize(branch);
+      const branchMatch = !branch || branch === 'All' || targetBranchNorm === 'all' || userBranch === targetBranchNorm;
+
+      // Semester Check
+      // Normalize both sides by removing () and spaces
+      const userSem = normalize(data.semester?.replace(/[()]/g, ''));
+      const targetSem = normalize(yearSem?.replace(/[()]/g, ''));
+      const semMatch = !yearSem || yearSem === 'All' || targetSem === 'all' || userSem === targetSem;
+
+      if (branchMatch && semMatch) {
+        list.push({
+          email: data.email,
+          name: data.full_name || 'Student',
+          id: doc.id
+        });
+      } else {
+        // Optional Debug: Log why a student was skipped (uncomment if debugging specific student)
+        // console.log(`Skipping ${data.full_name}: BranchMatch=${branchMatch} (${userBranch} vs ${targetBranchNorm}), SemMatch=${semMatch} (${userSem} vs ${targetSem})`);
+      }
+    });
+
+    console.log(`[getRecipientsFromDB] Matched ${list.length} students out of ${snapshot.size} total students.`);
+    return list;
+  };
+
   const fetchRecipients = async () => {
     setIsFetchingEmails(true);
+    console.log(`[CreateActivity] Fetching recipients. Branch: ${notifyBranch}, YearSem: ${notifyYearSem}`);
     try {
-      // Parse Year/Sem from notifyYearSem string, e.g. "(3/5)" -> Year 3, Sem 5
-      let targetYear = '';
-      let targetSem = '';
+      const list = await getRecipientsFromDB(notifyBranch, notifyYearSem);
+      setRecipientList(list);
 
-      if (notifyYearSem !== 'All') {
-        const match = notifyYearSem.match(/\((\d+)\/(\d+)\)/);
-        if (match) {
-          targetYear = match[1];
-          targetSem = match[2];
-        } else {
-          // Fallback if format is different or just "Sem 5"
-          // Try to extract digits? 
-          // Requirement says: "Select Year ... Select Semester" in setup.
-          // But here we have a combined dropdown.
-          // If we can't parse, we might fail to match.
-          // Let's assume the dropdown values in CreateActivity match the (Y/S) pattern: (1/1), (1/2)...
-        }
+      if (list.length === 0) {
+        toast({ title: 'No recipients found', description: `No active recipients found for ${notifyBranch} (Year/Sem: ${notifyYearSem})`, variant: 'warning' });
+      } else {
+        toast({ title: 'Recipients updated', description: `Found ${list.length} recipients.` });
       }
-
-      let q = query(collection(db, 'email_recipients'), where('is_active', '==', true));
-
-      if (notifyBranch !== 'All') {
-        q = query(q, where('branch', '==', notifyBranch));
-      }
-
-      if (targetYear && targetSem) {
-        q = query(q, where('year', '==', targetYear), where('semester', '==', targetSem));
-      }
-
-      const querySnapshot = await getDocs(q);
-      const matchedStudents: { email: string; name: string; id: string }[] = [];
-
-      querySnapshot.forEach((doc) => {
-        const data = doc.data();
-        if (data.email) {
-          matchedStudents.push({
-            email: data.email,
-            name: 'Student', // Name not stored in email_recipients table currently
-            id: doc.id
-          });
-        }
-      });
-
-      setRecipientList(matchedStudents);
-      if (matchedStudents.length === 0) {
-        toast({ title: 'No recipients found', description: `No active recipients found for ${notifyBranch} (Year: ${targetYear || 'Any'}, Sem: ${targetSem || 'Any'})`, variant: 'warning' });
-      }
-
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error fetching students:', error);
-      toast({ title: 'Error', description: 'Failed to fetch recipient list', variant: 'destructive' });
+      toast({
+        title: 'Error fetching recipients',
+        description: error.message || 'Unknown error. Check console for details.',
+        variant: 'destructive'
+      });
     } finally {
       setIsFetchingEmails(false);
     }
@@ -361,6 +416,23 @@ const CreateActivity = () => {
       setInstructions(existingActivity.instructions || '');
       setSubjectId(existingActivity.subject_id);
       setDeadline(existingActivity.deadline || '');
+
+      // Parse deadline for 12h picker
+      if (existingActivity.deadline) {
+        const dateObj = new Date(existingActivity.deadline);
+        if (!isNaN(dateObj.getTime())) {
+          setDatePart(existingActivity.deadline.split('T')[0]); // YYYY-MM-DD
+          let h = dateObj.getHours();
+          const m = dateObj.getMinutes();
+          const ampm = h >= 12 ? 'PM' : 'AM';
+          h = h % 12;
+          h = h ? h : 12; // the hour '0' should be '12'
+          setHourPart(h.toString());
+          setMinutePart(m.toString().padStart(2, '0'));
+          setAmpmPart(ampm);
+        }
+      }
+
       setTargetBranch(existingActivity.target_branch || 'All');
       setTargetYearSemester(`${existingActivity.target_year || 'All'}/${existingActivity.target_semester || 'All'}`); // Imperfect reconstruction but works if format matches
       // Adjust reconstructed Year/Sem to match dropdown value format "(Y/S)" or "All"
@@ -395,6 +467,21 @@ const CreateActivity = () => {
     }
   }, [isEditMode, existingActivity]);
 
+
+  // Sync 12h parts to deadline string
+  useEffect(() => {
+    if (!datePart) {
+      setDeadline('');
+      return;
+    }
+    let h = parseInt(hourPart);
+    if (ampmPart === 'PM' && h !== 12) h += 12;
+    if (ampmPart === 'AM' && h === 12) h = 0;
+
+    const hStr = h.toString().padStart(2, '0');
+    const iso = `${datePart}T${hStr}:${minutePart}`;
+    setDeadline(iso);
+  }, [datePart, hourPart, minutePart, ampmPart]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -432,7 +519,7 @@ const CreateActivity = () => {
       instructions,
       subject_id: subjectId,
       activity_type: 'mixed' as const,
-      deadline: deadline || undefined,
+      deadline: deadline || null,
       total_marks: totalMarks,
       is_published: isPublished,
       target_branch: targetBranch,
@@ -457,6 +544,12 @@ const CreateActivity = () => {
           activityData: commonData,
           questions: questions
         });
+
+        // Check if status changed from Draft -> Published
+        if (existingActivity && !existingActivity.is_published && isPublished) {
+          await triggerNotification(activityId);
+        }
+
         toast({ title: 'Activity Updated', description: 'Changes have been saved successfully.' });
       } else {
         // --- CREATE ---
@@ -466,24 +559,11 @@ const CreateActivity = () => {
             ...q,
             options: q.options
           })),
-          notification_email: undefined // or pass from state
+          notification_email: undefined
         });
 
-        // Notification Logic similar to before...
-        if (isPublished && notificationEnabled && recipientList.length > 0) {
-          // ... (Keep existing notification logic or refactor to helper)
-          // For brevity in this Edit implementation, I'm noting we should call notify here too if needed.
-          // Copying previous notification block logic below for Create path:
-          try {
-            // ... same notification fetch call using newActivity.id ...
-            // Re-implementation omitted for brevity to focus on Edit Integration structure
-            // But generally, we might want to notify on Edit? user didn't explicitly ask, usually only on first publish.
-            // If switching Draft -> Published during Edit, we SHOULD notify.
-            if (!existingActivity?.is_published && isPublished) {
-              // It was draft, now published. Trigger Notification.
-              triggerNotification(newActivity.id || activityId || '');
-            }
-          } catch (e) { console.error(e); }
+        if (isPublished) {
+          await triggerNotification(newActivity.id);
         }
 
         toast({ title: 'Activity created!', description: isPublished ? 'Your activity is now live.' : 'Saved as draft.' });
@@ -491,6 +571,7 @@ const CreateActivity = () => {
 
       navigate('/teacher');
     } catch (error: any) {
+      console.error(error);
       toast({ title: 'Error', description: error.message, variant: 'destructive' });
     }
     setSaving(false);
@@ -498,11 +579,81 @@ const CreateActivity = () => {
 
   // Helper to deduplicate notification logic
   const triggerNotification = async (actId: string) => {
-    // ... logic from original file ...
-    // For now, I will assume the user is okay with the notification logic being primarily on Create or Publish transition.
-    // Detailed notification logic was large, best to keep it if possible or simplify. 
-    // I will assume the original code block handles it for Create. For Edit, I'll skip complex notif logic for now unless requested.
-  }
+    if (!notificationEnabled) return;
+
+    // Auto-fetch if list is empty but filters are set
+    let finalRecipients = recipientList;
+    if (finalRecipients.length === 0) {
+      console.log("Recipient list empty, attempting auto-fetch before sending...");
+      try {
+        finalRecipients = await getRecipientsFromDB(notifyBranch, notifyYearSem);
+        setRecipientList(finalRecipients);
+      } catch (e) {
+        console.error("Auto-fetch failed", e);
+      }
+    }
+
+    console.log(`[CreateActivity] Triggering notification for ${finalRecipients.length} recipients.`);
+
+    if (finalRecipients.length === 0) {
+      console.warn("[CreateActivity] No recipients to notify. Skipping.");
+      toast({ title: 'Notification Skipped', description: 'No recipients selected.', variant: 'warning' });
+      return;
+    }
+
+    try {
+      const subjectObj = subjects.find(s => s.id === subjectId);
+      const subjectName = subjectObj ? subjectObj.name : 'General';
+
+      // Format date for user friendly display
+      const publishDate = new Date().toLocaleDateString('en-GB', {
+        day: 'numeric', month: 'short', year: 'numeric'
+      });
+
+      const formattedDeadline = deadline
+        ? new Date(deadline).toLocaleDateString('en-US', {
+          day: 'numeric',
+          month: 'short',
+          year: 'numeric',
+          hour: 'numeric',
+          minute: '2-digit',
+          hour12: true
+        })
+        : "No Deadline";
+
+      console.log("[CreateActivity] Sending request to /api/notify...");
+
+      const response = await fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001'}/api/notify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          recipients: finalRecipients,
+          quizDetails: {
+            title: title,
+            subject: subjectName,
+            branch: targetBranch,
+            year: targetYearSemester !== 'All' ? targetYearSemester.split('/')[0].replace('(', '') : 'All',
+            semester: targetYearSemester !== 'All' ? targetYearSemester.split('/')[1].replace(')', '') : 'All',
+            link: `${window.location.origin}/student/activity/${actId}`,
+            publishDate: publishDate,
+            deadline: formattedDeadline,
+            facultyName: profile?.full_name || 'Faculty'
+          },
+          customSubject: customSubject,
+          customMessage: customMessage
+        })
+      });
+
+      const result = await response.json();
+      if (result.success) {
+        toast({ title: 'Notification Sent', description: `Emailed ${result.results?.success || 0} students.` });
+      } else {
+        console.error(result);
+      }
+    } catch (e) {
+      console.error("Failed to send notification", e);
+    }
+  };
 
   if (authLoading || (isEditMode && isLoadingActivity)) return <div className="min-h-screen bg-background flex items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-primary" /></div>;
 
@@ -664,12 +815,30 @@ const CreateActivity = () => {
                     <div className="space-y-2">
                       <Label>Email Message</Label>
                       <Textarea
-                        placeholder={`Hello,\n\nA new assessment has been published for your class.\n\nBranch: {{branch}}\nYear: {{year}}\nSemester: {{semester}}\n\nPlease log in to the application to access it.\n\nRegards,\nOrigin Trivia Team`}
+                        placeholder={`Hello {{student_name}},
+
+A new activity has been published for your class.
+
+Activity Name : {{Activity_Name}}
+Subject       : {{Subject}}
+Branch        : {{Branch}}
+Year          : {{Year}}
+Semester      : {{Semester}}
+Published On  : {{Publish_Date}}
+Deadline      : {{Deadline}}
+
+Please log in to the Origin Trivia platform and complete the activity within the given time.
+https://origin-trivia.netlify.app/
+If you have any questions, contact your faculty.
+
+Best regards,
+{{Faculty_Name}}
+Origin Trivia Team`}
                         value={customMessage}
                         onChange={(e) => setCustomMessage(e.target.value)}
                         rows={10}
                       />
-                      <p className="text-xs text-muted-foreground">Supported tags: &#123;&#123;student_name&#125;&#125;, &#123;&#123;quiz_title&#125;&#125;, &#123;&#123;branch&#125;&#125;, &#123;&#123;year&#125;&#125;, &#123;&#123;semester&#125;&#125;</p>
+                      <p className="text-xs text-muted-foreground">Supported tags: &#123;&#123;student_name&#125;&#125;, &#123;&#123;Activity_Name&#125;&#125;, &#123;&#123;Subject&#125;&#125;, &#123;&#123;Branch&#125;&#125;, &#123;&#123;Year&#125;&#125;, &#123;&#123;Semester&#125;&#125;, &#123;&#123;Publish_Date&#125;&#125;, &#123;&#123;Deadline&#125;&#125;, &#123;&#123;Faculty_Name&#125;&#125;</p>
                     </div>
                   </CardContent>
                 )}
@@ -768,7 +937,7 @@ const CreateActivity = () => {
                                 <Label className="text-xs text-muted-foreground mb-1 block">Question Text</Label>
                                 <Textarea
                                   placeholder="Enter question..."
-                                  value={question.question_text}
+                                  value={question.question_text || ''}
                                   onChange={(e) => updateQuestion(question.id, { question_text: e.target.value })}
                                 />
                               </div>
@@ -812,7 +981,7 @@ const CreateActivity = () => {
                                     <Textarea
                                       className="font-mono bg-muted/50"
                                       rows={5}
-                                      value={question.code_template}
+                                      value={question.code_template || ''}
                                       onChange={(e) => updateQuestion(question.id, { code_template: e.target.value })}
                                     />
                                     {['output_prediction', 'code_completion'].includes(question.question_type) && (
@@ -821,30 +990,64 @@ const CreateActivity = () => {
                                           {question.question_type === 'code_completion' ? 'Exact Expected Code' : 'Expected Output'}
                                         </Label>
                                         <Input
-                                          value={question.correct_answer}
+                                          value={question.correct_answer || ''}
                                           onChange={(e) => updateQuestion(question.id, { correct_answer: e.target.value })}
                                           placeholder={question.question_type === 'code_completion' ? "Full expected code..." : "Exact output string..."}
                                         />
                                       </div>
                                     )}
                                     {question.question_type === 'code_completion' && (
-                                      <div className="flex items-center gap-4 mt-2">
-                                        <div className="flex items-center space-x-2">
-                                          <Label className="text-xs">Case Sensitive</Label>
-                                          <Switch
-                                            checked={question.case_sensitive}
-                                            onCheckedChange={(checked) => updateQuestion(question.id, { case_sensitive: checked })}
-                                          />
+                                      <div className="space-y-4 border rounded-md p-3 bg-muted/20">
+                                        <div className="flex justify-between items-center">
+                                          <Label className="text-sm font-medium">Blanks Configuration</Label>
+                                          <Button
+                                            type="button"
+                                            size="sm"
+                                            variant="secondary"
+                                            onClick={() => extractBlanks(question.id, question.code_template)}
+                                            className="h-8 gap-2"
+                                          >
+                                            <RefreshCw className="h-3 w-3" /> Update Blanks from Code
+                                          </Button>
                                         </div>
-                                        <div className="w-[120px]">
-                                          <Label className="text-xs text-muted-foreground mb-1 block">Marks per Blank</Label>
-                                          <Input
-                                            type="number"
-                                            value={question.marks_per_blank || ''}
-                                            onChange={(e) => updateQuestion(question.id, { marks_per_blank: parseInt(e.target.value) || 0 })}
-                                            placeholder="e.g 2"
-                                          />
-                                        </div>
+
+                                        <p className="text-xs text-muted-foreground">
+                                          Write code with <code>&#123;&#123;answer&#125;&#125;</code> to define blanks.
+                                          Click "Update Blanks" to generate the list below.
+                                        </p>
+
+                                        {question.blanks && question.blanks.length > 0 && (
+                                          <div className="space-y-2">
+                                            <div className="grid grid-cols-12 gap-2 text-xs font-medium text-muted-foreground mb-1 px-2">
+                                              <div className="col-span-1">#</div>
+                                              <div className="col-span-8">Correct Answer</div>
+                                              <div className="col-span-3">Marks</div>
+                                            </div>
+                                            {question.blanks.map((blank, idx) => (
+                                              <div key={blank.id} className="grid grid-cols-12 gap-2 items-center px-2 py-1 bg-card rounded border">
+                                                <div className="col-span-1 text-xs text-muted-foreground">{idx + 1}</div>
+                                                <div className="col-span-8">
+                                                  <Input
+                                                    value={blank.correct_answers[0] || ''}
+                                                    onChange={(e) => updateBlank(question.id, blank.id, { correct_answers: [e.target.value] })}
+                                                    className="h-7 text-sm font-mono"
+                                                  />
+                                                </div>
+                                                <div className="col-span-3">
+                                                  <Input
+                                                    type="number"
+                                                    value={blank.marks}
+                                                    onChange={(e) => updateBlank(question.id, blank.id, { marks: parseInt(e.target.value) || 0 })}
+                                                    className="h-7 text-sm"
+                                                  />
+                                                </div>
+                                              </div>
+                                            ))}
+                                            <div className="text-right text-xs text-muted-foreground mt-2">
+                                              Total Marks: {question.blanks.reduce((s, b) => s + b.marks, 0)}
+                                            </div>
+                                          </div>
+                                        )}
                                       </div>
                                     )}
                                   </div>
@@ -1005,14 +1208,21 @@ const CreateActivity = () => {
                               {question.question_type === 'concept_identification' && (
                                 <div className="space-y-4">
                                   <div className="space-y-2">
-                                    <Label className="text-xs text-muted-foreground">List of Concepts (Checkbox Selection)</Label>
-                                    <p className="text-xs text-muted-foreground">Add options above using the "Options" section. Mark the correct concepts.</p>
+                                    <Label className="text-xs text-muted-foreground">Code Snippet (containing the concept)</Label>
+                                    <Textarea
+                                      className="font-mono bg-muted/50"
+                                      rows={4}
+                                      value={question.code_template || ''}
+                                      onChange={(e) => updateQuestion(question.id, { code_template: e.target.value })}
+                                      placeholder="Enter code..."
+                                    />
                                   </div>
-                                  <div className="flex items-center space-x-2">
-                                    <Label className="text-xs">Auto Evaluation</Label>
-                                    <Switch
-                                      checked={question.evaluation_mode !== 'manual'}
-                                      onCheckedChange={(checked) => updateQuestion(question.id, { evaluation_mode: checked ? 'auto' : 'manual' })}
+                                  <div className="space-y-2">
+                                    <Label className="text-xs text-muted-foreground">Exact Answer (Concept Name)</Label>
+                                    <Input
+                                      value={question.correct_answer || ''}
+                                      onChange={(e) => updateQuestion(question.id, { correct_answer: e.target.value })}
+                                      placeholder="e.g. Polymorphism"
                                     />
                                   </div>
                                 </div>
@@ -1085,7 +1295,52 @@ const CreateActivity = () => {
                 <CardContent className="space-y-4">
                   <div>
                     <Label>Deadline</Label>
-                    <Input type="datetime-local" value={deadline} onChange={(e) => setDeadline(e.target.value)} />
+                    <div className="flex flex-col gap-2">
+                      <div className="flex gap-2 items-center">
+                        <Input
+                          type="date"
+                          value={datePart}
+                          onChange={(e) => setDatePart(e.target.value)}
+                          className="flex-1"
+                        />
+                        <div className="flex gap-1">
+                          <Select value={hourPart} onValueChange={setHourPart}>
+                            <SelectTrigger className="w-[70px]">
+                              <SelectValue placeholder="HH" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {Array.from({ length: 12 }, (_, i) => i + 1).map(h => (
+                                <SelectItem key={h} value={h.toString()}>{h}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                          <Select value={minutePart} onValueChange={setMinutePart}>
+                            <SelectTrigger className="w-[70px]">
+                              <SelectValue placeholder="MM" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {Array.from({ length: 60 }, (_, i) => i.toString().padStart(2, '0')).map(m => (
+                                <SelectItem key={m} value={m}>{m}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                          <Select value={ampmPart} onValueChange={setAmpmPart}>
+                            <SelectTrigger className="w-[70px]">
+                              <SelectValue placeholder="AM/PM" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="AM">AM</SelectItem>
+                              <SelectItem value="PM">PM</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      </div>
+                      {deadline && !isNaN(new Date(deadline).getTime()) && (
+                        <p className="text-xs text-muted-foreground">
+                          Preview: {new Date(deadline).toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true })}
+                        </p>
+                      )}
+                    </div>
                   </div>
                   <div className="space-y-2">
                     <Label>Target Branch</Label>
@@ -1132,7 +1387,7 @@ const CreateActivity = () => {
               <Card>
                 <CardContent className="pt-6 space-y-3">
                   <Button type="submit" className="w-full" disabled={saving}>
-                    {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : (isPublished ? 'Create & Publish' : 'Save as Draft')}
+                    {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : (isPublished ? (isEditMode ? 'Publish Changes' : 'Create & Publish') : 'Save as Draft')}
                   </Button>
                   <Button type="button" variant="outline" className="w-full" onClick={() => navigate('/teacher')}>Cancel</Button>
                 </CardContent>

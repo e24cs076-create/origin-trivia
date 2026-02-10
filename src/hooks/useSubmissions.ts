@@ -34,10 +34,10 @@ export const useSubmissions = (activityId?: string) => {
   const queryClient = useQueryClient();
 
   // Fetch submissions
-  const { data: submissions = [], isLoading, error } = useQuery({
+  const { data: submissions = [], isLoading, error, refetch } = useQuery({
     queryKey: ['submissions', activityId, role],
     queryFn: async () => {
-      let q = query(collection(db, 'submissions'), orderBy('created_at', 'desc'));
+      let q = query(collection(db, 'submissions'));
 
       if (activityId) {
         q = query(q, where('activity_id', '==', activityId));
@@ -47,7 +47,11 @@ export const useSubmissions = (activityId?: string) => {
         q = query(q, where('student_id', '==', user?.uid));
       }
 
+
+      console.log(`[useSubmissions] Querying for user: ${user?.uid}, role: ${role}`);
       const querySnapshot = await getDocs(q);
+      console.log(`[useSubmissions] Found ${querySnapshot.size} submissions.`);
+
       return querySnapshot.docs.map(doc => ({
         id: doc.id,
         ...doc.data()
@@ -55,6 +59,13 @@ export const useSubmissions = (activityId?: string) => {
     },
     enabled: !!user,
   });
+
+
+
+  // Original code seems to return object at the end.
+  // I need to check how useQuery result is destructured.
+  // It was: const { data: submissions = [], isLoading, error } = useQuery(...)
+  // I need to add refetch there.
 
   // Create or get existing submission
   const startSubmission = useMutation({
@@ -103,11 +114,16 @@ export const useSubmissions = (activityId?: string) => {
       }[];
     }) => {
       const batch = writeBatch(db);
+      let calculatedTotalScore = 0;
 
       answers.forEach(answer => {
         // Use composite ID to prevent duplicates: submissionId_questionId
         const answerId = `${submissionId}_${answer.question_id}`;
         const answerRef = doc(db, 'submissions', submissionId, 'answers', answerId);
+
+        if (answer.score) {
+          calculatedTotalScore += answer.score;
+        }
 
         batch.set(answerRef, {
           submission_id: submissionId,
@@ -125,6 +141,7 @@ export const useSubmissions = (activityId?: string) => {
       const submissionRef = doc(db, 'submissions', submissionId);
       batch.update(submissionRef, {
         status: 'submitted',
+        total_score: calculatedTotalScore,
         submitted_at: new Date().toISOString(),
       });
 
@@ -185,6 +202,7 @@ export const useSubmissions = (activityId?: string) => {
     submissions,
     isLoading,
     error,
+    refetch,
     startSubmission,
     submitAnswers,
     evaluateSubmission,
