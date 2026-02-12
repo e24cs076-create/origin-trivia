@@ -239,14 +239,32 @@ Origin Trivia Team`;
     // --- 1. Google Apps Script (Batch Send) ---
     if (process.env.GOOGLE_APPS_SCRIPT_URL) {
         console.log(`[GAS] Sending batch request for ${recipients.length} recipients...`);
+
+        // Pre-process body for GAS (Batch mode doesn't support per-student customization unless GAS handles it)
+        // We replace {{student_name}} with "Student" to avoid broken placeholders.
+        let processedBody = (customMessage || defaultBody)
+            .replace(/{{Activity_Name}}/g, quizDetails.title)
+            .replace(/{{Subject}}/g, quizDetails.subject)
+            .replace(/{{Branch}}/g, quizDetails.branch)
+            .replace(/{{Year}}/g, quizDetails.year)
+            .replace(/{{Semester}}/g, quizDetails.semester)
+            .replace(/{{Publish_Date}}/g, quizDetails.publishDate || new Date().toLocaleDateString())
+            .replace(/{{Deadline}}/g, quizDetails.deadline || "No Deadline")
+            .replace(/{{Faculty_Name}}/g, quizDetails.facultyName || "Faculty")
+            .replace(/{{student_name}}/g, "Student")
+            .replace(/{Student name}/g, "Student");
+
+        const processedSubject = (customSubject || "New Quiz Available: {{quiz_title}}")
+            .replace('{{quiz_title}}', quizDetails.title);
+
         try {
             await retryOperation(async () => {
                 const gasResponse = await fetch(process.env.GOOGLE_APPS_SCRIPT_URL, {
                     method: 'POST',
                     body: JSON.stringify({
                         recipients: recipients,
-                        subject: (customSubject || "New Quiz Available: {{quiz_title}}").replace('{{quiz_title}}', quizDetails.title),
-                        body: (customMessage || defaultBody)
+                        subject: processedSubject,
+                        body: processedBody
                     })
                 });
 
