@@ -15,6 +15,7 @@ import EmailLogs from "./pages/teacher/EmailLogs";
 import EmailSetup from "./pages/teacher/EmailSetup";
 import ActivityDetails from "./pages/teacher/ActivityDetails";
 import ActivitySubmissions from "./pages/teacher/ActivitySubmissions";
+import QuestionPaper from "./pages/teacher/QuestionPaper";
 import StudentDashboard from "./pages/student/StudentDashboard";
 import StudentActivity from "./pages/student/StudentActivity";
 import NotFound from "./pages/NotFound";
@@ -125,6 +126,14 @@ const AppRoutes = () => {
         element={
           <ProtectedRoute allowedRole="teacher">
             <ActivitySubmissions />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/teacher/activity/:activityId/print"
+        element={
+          <ProtectedRoute allowedRole="teacher">
+            <QuestionPaper />
           </ProtectedRoute>
         }
       />

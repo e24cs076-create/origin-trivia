@@ -34,6 +34,7 @@ import {
   Mail,
   Send,
   Copy,
+  FileDown,
 } from 'lucide-react';
 import {
   DropdownMenu,
@@ -291,6 +292,11 @@ const TeacherDashboard = () => {
                         <DropdownMenuItem onClick={() => handleDuplicate(activity.id, activity.title)}>
                           <Copy className="mr-2 h-4 w-4" />
                           Duplicate
+                        </DropdownMenuItem>
+
+                        <DropdownMenuItem onClick={() => window.open(`/teacher/activity/${activity.id}/print`, '_blank')}>
+                          <FileDown className="mr-2 h-4 w-4" />
+                          Download Question Paper
                         </DropdownMenuItem>
 
                         {!activity.is_published && (

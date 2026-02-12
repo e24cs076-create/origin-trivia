@@ -5,15 +5,27 @@ import bodyParser from 'body-parser';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import dotenv from 'dotenv';
+import OpenAI from 'openai';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+dotenv.config({ path: path.join(__dirname, '../.env') });
 
 const app = express();
 const port = process.env.PORT || 3001;
 
 app.use(cors({
-    origin: ['http://localhost:8080', 'http://localhost:5173', 'http://127.0.0.1:8080', 'https://origin-trivia.netlify.app', 'https://origin-trivia.vercel.app'],
+    origin: [
+        'http://localhost:8080',
+        'http://localhost:8081',
+        'http://localhost:8082',
+        'http://localhost:5173',
+        'http://127.0.0.1:8080',
+        'https://origin-trivia.netlify.app',
+        'https://origin-trivia.vercel.app'
+    ],
     methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
@@ -26,10 +38,11 @@ app.use((req, res, next) => {
     next();
 });
 
-import dotenv from 'dotenv';
-import OpenAI from 'openai';
+app.get('/api/health', (req, res) => {
+    res.json({ status: 'ok', time: new Date().toISOString() });
+});
 
-dotenv.config({ path: path.join(__dirname, '../.env') });
+
 
 const openai = new OpenAI({
     baseURL: "https://openrouter.ai/api/v1",
@@ -184,14 +197,8 @@ app.post('/api/notify', async (req, res) => {
         logs: []
     };
 
-    // Send emails
-    for (const student of recipients) {
-        try {
-            // Template Replacement
-            const subject = (customSubject || "New Quiz Available: {{quiz_title}}")
-                .replace('{{quiz_title}}', quizDetails.title);
-
-            const defaultBody = `Hello {{student_name}},
+    // Define Default Body Template
+    const defaultBody = `Hello {{student_name}},
 
 A new activity has been published for your class.
 
@@ -216,121 +223,129 @@ Best regards,
 {{Faculty_Name}}
 Origin Trivia Team`;
 
-            const messageTemplate = customMessage || defaultBody;
-
-            const body = messageTemplate
-                .replace(/{{student_name}}/g, student.name)
-                .replace(/{Student name}/g, student.name)
-                .replace(/{{Activity_Name}}/g, quizDetails.title)
-                .replace(/{{Subject}}/g, quizDetails.subject)
-                .replace(/{{Branch}}/g, quizDetails.branch)
-                .replace(/{{Year}}/g, quizDetails.year)
-                .replace(/{{Semester}}/g, quizDetails.semester)
-                .replace(/{{Publish_Date}}/g, quizDetails.publishDate || new Date().toLocaleDateString())
-                .replace(/{{Deadline}}/g, quizDetails.deadline || "No Deadline")
-                .replace(/{{Faculty_Name}}/g, quizDetails.facultyName || "Faculty");
-
-            // Send Real Mail via SMTP (if configured)
-            const isPlaceholderPass = process.env.EMAIL_PASS && process.env.EMAIL_PASS.includes('$6969$');
-
-            if (process.env.EMAIL_USER && process.env.EMAIL_PASS && !isPlaceholderPass && !process.env.EMAIL_USER.includes('your-email')) {
-                await transporter.sendMail({
-                    from: `"Origin Trivia" <${process.env.EMAIL_USER}>`,
-                    to: student.email,
-                    subject: subject,
-                    text: body
-                });
-                console.log(`[SMTP SENT] To: ${student.email}`);
-            } else if (isPlaceholderPass) {
-                console.log(`[SMTP SKIPPED] Placeholder password detected. Using Webhook only.`);
+    // Retry Helper
+    const retryOperation = async (operation, maxRetries = 3, delay = 1000) => {
+        for (let i = 0; i < maxRetries; i++) {
+            try {
+                return await operation();
+            } catch (err) {
+                if (i === maxRetries - 1) throw err;
+                console.warn(`[RETRY] Attempt ${i + 1} failed. Retrying in ${delay}ms...`, err.message);
+                await new Promise(res => setTimeout(res, delay));
             }
-
-            // Send via Google Apps Script (if configured)
-            if (process.env.GOOGLE_APPS_SCRIPT_URL) {
-                // We send one by one to personalizing, or we could batch.
-                // To keep 'logs' consistent with existing structure, let's send one by one for now
-                // OR optimize: The GAS script I wrote handles a list.
-                // Let's use the BATCH capability of the GAS script for efficiency, 
-                // BUT we are currently inside a loop `for (const student of recipients)`.
-                // Refactoring to batch would be efficient but changes the structure significantly.
-
-                // For "Free Limits ~500/day", sending 1 HTTP request per student is bad.
-                // Better: Collect all intended emails and send 1 POST to GAS.
-
-                // However, preserving existing logic:
-                // Let's collect them first? 
-                // The current loop processes recipients one by one.
-
-                // Let's just do an HTTP call per student for now (simplest integration).
-                // It might be slow for 60 students.
-
-                try {
-                    const gasResponse = await fetch(process.env.GOOGLE_APPS_SCRIPT_URL, {
-                        method: 'POST',
-                        body: JSON.stringify({
-                            recipients: [student], // Wrap in array as GAS expects list
-                            subject: subject,
-                            body: body
-                        })
-                    });
-                    const gasResult = await gasResponse.json();
-                    if (gasResult.success) {
-                        console.log(`[GAS SENT] To: ${student.email}`);
-                    } else {
-                        throw new Error(gasResult.error || "GAS Unknown Error");
-                    }
-                } catch (gasErr) {
-                    console.error("[GAS FAIL]", gasErr);
-                    throw gasErr; // Allow catch block below to handle it
-                }
-            }
-
-            // Send via MacroDroid Webhook (if configured)
-            if (process.env.MACRODROID_WEBHOOK_URL) {
-                // Ensure URL ends with 'send_email' or uses query params? 
-                // We'll just POST the data and let MacroDroid handle it.
-                // MacroDroid Webhook Trigger accepts parameters as query params (?param1=value) usually OR JSON body?
-                // Standard MacroDroid webhook trigger usually takes query params for variables. 
-                // e.g. https://trigger.macrodroid.com/UUID/send_email?to=...&subject=...
-                // But let's try JSON body if supported, or constructing URL.
-                // Documentation says query parameters are mapped to variables [webhook_param].
-
-                const webhookUrl = new URL(process.env.MACRODROID_WEBHOOK_URL);
-                webhookUrl.searchParams.append('to', student.email);
-                webhookUrl.searchParams.append('subject', subject);
-                webhookUrl.searchParams.append('body', body);
-
-                // Using fetch (Node 18+)
-                await fetch(webhookUrl.toString());
-                console.log(`[MACRODROID TRIGGERED] To: ${student.email}`);
-            }
-
-            results.success++;
-            results.logs.push({
-                email: student.email,
-                status: 'sent',
-                time: new Date().toISOString()
-            });
-
-        } catch (err) {
-            console.error(`[NOTIFICATION FAILED] To: ${student.email}`, err);
-            results.failed++;
-
-            // Extract meaningful error message
-            let errorMessage = err.message;
-            if (err.responseCode === 535) {
-                errorMessage = "Authentication Failed: Check email/password in .env";
-            } else if (err.code === 'ECONNREFUSED') {
-                errorMessage = "Connection Refused: Check internet or firewall";
-            }
-
-            results.logs.push({
-                email: student.email,
-                status: 'failed',
-                error: errorMessage, // Send error back to client
-                time: new Date().toISOString()
-            });
         }
+    };
+
+    // --- 1. Google Apps Script (Batch Send) ---
+    if (process.env.GOOGLE_APPS_SCRIPT_URL) {
+        console.log(`[GAS] Sending batch request for ${recipients.length} recipients...`);
+        try {
+            await retryOperation(async () => {
+                const gasResponse = await fetch(process.env.GOOGLE_APPS_SCRIPT_URL, {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        recipients: recipients,
+                        subject: (customSubject || "New Quiz Available: {{quiz_title}}").replace('{{quiz_title}}', quizDetails.title),
+                        body: (customMessage || defaultBody)
+                    })
+                });
+
+                const responseText = await gasResponse.text();
+                // Try parsing JSON, but fallback to text if failed (GAS sometimes sends HTML on error)
+                let gasResult;
+                try {
+                    gasResult = JSON.parse(responseText);
+                    console.log(`[GAS] Batch Result: Success=${gasResult.success} Sent=${gasResult.sent} Failed=${gasResult.failed}`);
+                } catch (e) {
+                    console.error("[GAS] Parsed Error (Non-JSON response):", responseText);
+                    throw new Error("GAS returned invalid JSON");
+                }
+
+                if (gasResult.logs) {
+                    gasResult.logs.forEach(log => {
+                        results.logs.push({
+                            email: log.email,
+                            status: log.status,
+                            error: log.error,
+                            method: 'GAS',
+                            time: new Date().toISOString()
+                        });
+                        if (log.status === 'sent') results.success++;
+                        else results.failed++;
+                    });
+                }
+            });
+        } catch (gasErr) {
+            console.error("[GAS BATCH FAILED AFTER RETRIES]", gasErr);
+            results.logs.push({ error: gasErr.message, method: 'GAS_BATCH_FAIL' });
+        }
+    }
+
+    // --- 2. SMTP (Concurrent Send) ---
+    const isPlaceholderPass = process.env.EMAIL_PASS && process.env.EMAIL_PASS.includes('$6969$');
+    const smtpEnabled = process.env.EMAIL_USER && process.env.EMAIL_PASS && !isPlaceholderPass && !process.env.EMAIL_USER.includes('your-email');
+
+    if (smtpEnabled) {
+        console.log(`[SMTP] Starting concurrent send for ${recipients.length} recipients...`);
+
+        const sendEmailPromise = async (student) => {
+            try {
+                const subject = (customSubject || "New Quiz Available: {{quiz_title}}")
+                    .replace('{{quiz_title}}', quizDetails.title);
+
+                let body = (customMessage || defaultBody)
+                    .replace(/{{Activity_Name}}/g, quizDetails.title)
+                    .replace(/{{Subject}}/g, quizDetails.subject)
+                    .replace(/{{Branch}}/g, quizDetails.branch)
+                    .replace(/{{Year}}/g, quizDetails.year)
+                    .replace(/{{Semester}}/g, quizDetails.semester)
+                    .replace(/{{Publish_Date}}/g, quizDetails.publishDate || new Date().toLocaleDateString())
+                    .replace(/{{Deadline}}/g, quizDetails.deadline || "No Deadline")
+                    .replace(/{{Faculty_Name}}/g, quizDetails.facultyName || "Faculty")
+                    .replace(/{{student_name}}/g, student.name)
+                    .replace(/{Student name}/g, student.name);
+
+                // Wrap individual send in retry
+                await retryOperation(async () => {
+                    await transporter.sendMail({
+                        from: `"Origin Trivia" <${process.env.EMAIL_USER}>`,
+                        to: student.email,
+                        subject: subject,
+                        text: body
+                    });
+                }, 2, 500); // 2 retries per student
+
+                return { email: student.email, status: 'sent', method: 'SMTP' };
+            } catch (err) {
+                console.error(`[SMTP FAIL] ${student.email}:`, err.message);
+                let errorMessage = err.message;
+                if (err.responseCode === 535) errorMessage = "Auth Failed";
+                else if (err.code === 'ECONNREFUSED') errorMessage = "Conn Refused";
+
+                return { email: student.email, status: 'failed', error: errorMessage, method: 'SMTP' };
+            }
+        };
+
+        const smtpResults = await Promise.all(recipients.map(sendEmailPromise));
+
+        smtpResults.forEach(res => {
+            results.logs.push({ ...res, time: new Date().toISOString() });
+            if (res.status === 'sent') results.success++;
+            else results.failed++;
+        });
+    }
+
+    // --- 3. MacroDroid (Webhook) ---
+    if (process.env.MACRODROID_WEBHOOK_URL) {
+        const webhookUrlBase = process.env.MACRODROID_WEBHOOK_URL;
+        recipients.forEach(student => {
+            const subject = (customSubject || "Notification").replace('{{quiz_title}}', quizDetails.title);
+            const url = new URL(webhookUrlBase);
+            url.searchParams.append('to', student.email);
+            url.searchParams.append('subject', subject);
+            fetch(url.toString()).catch(e => console.error("MacroDroid Fail", e));
+        });
+        console.log("[MACRODROID] Triggered webhooks.");
     }
 
     res.json({ success: true, results });
@@ -344,10 +359,8 @@ process.on('unhandledRejection', (reason, promise) => {
     console.error('Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
-// Export app for Vercel
 export default app;
 
-// Only listen if running directly (local dev)
 if (process.env.NODE_ENV !== 'production' && process.argv[1] === fileURLToPath(import.meta.url)) {
     try {
         const server = app.listen(port, '0.0.0.0', () => {

@@ -426,9 +426,19 @@ export const useActivity = (activityId: string) => {
         ...d.data()
       })) as Question[];
 
+      // Fetch subject details if subject_id exists
+      let subjectData = null;
+      if (activityData.subject_id) {
+        const subjectDoc = await getDoc(doc(db, 'subjects', activityData.subject_id));
+        if (subjectDoc.exists()) {
+          subjectData = { id: subjectDoc.id, ...subjectDoc.data() };
+        }
+      }
+
       return {
         ...activityData,
         questions,
+        subjects: subjectData, // Populate subjects field
       } as Activity & { questions: Question[] };
     },
     enabled: !!user && !!activityId,

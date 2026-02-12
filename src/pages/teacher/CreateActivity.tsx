@@ -645,13 +645,30 @@ const CreateActivity = () => {
       });
 
       const result = await response.json();
+
       if (result.success) {
-        toast({ title: 'Notification Sent', description: `Emailed ${result.results?.success || 0} students.` });
+        const sentCount = result.results?.success || 0;
+        const failedCount = result.results?.failed || 0;
+
+        if (sentCount > 0) {
+          toast({
+            title: 'Notification Sent',
+            description: `Successfully emailed ${sentCount} students.${failedCount > 0 ? ` (${failedCount} failed)` : ''}`
+          });
+        } else {
+          toast({
+            title: 'Notification Issue',
+            description: 'Server processed request but 0 emails were sent. Check server logs for details.',
+            variant: 'destructive'
+          });
+        }
       } else {
         console.error(result);
+        toast({ title: 'Notification Failed', description: result.message || 'Server returned error.', variant: 'destructive' });
       }
-    } catch (e) {
+    } catch (e: any) {
       console.error("Failed to send notification", e);
+      toast({ title: 'Connection Error', description: 'Could not reach notification server. Is it running?', variant: 'destructive' });
     }
   };
 
@@ -766,6 +783,28 @@ const CreateActivity = () => {
                         disabled={recipientList.length === 0}
                       >
                         {showRecipientPreview ? 'Hide List' : 'View List'}
+                      </Button>
+
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="ml-auto"
+                        onClick={async () => {
+                          try {
+                            const res = await fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001'}/api/health`);
+                            if (res.ok) {
+                              const data = await res.json();
+                              toast({ title: "Connection OK", description: `Server online at ${data.time}` });
+                            } else {
+                              toast({ title: "Connection Failed", description: `Status: ${res.status}`, variant: "destructive" });
+                            }
+                          } catch (e: any) {
+                            toast({ title: "Connection Error", description: `Could not reach ${import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001'}. Is server running?`, variant: "destructive" });
+                          }
+                        }}
+                      >
+                        Test Server Connection
                       </Button>
                     </div>
 
