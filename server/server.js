@@ -8,11 +8,11 @@ import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import OpenAI from 'openai';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const _filename = fileURLToPath(import.meta.url);
+const _dirname = path.dirname(_filename);
 
 try {
-    dotenv.config({ path: path.join(__dirname, '../.env') });
+    dotenv.config({ path: path.join(_dirname, '../.env') });
 } catch (e) {
     console.warn("Failed to load .env file (might be in production):", e.message);
 }
