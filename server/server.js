@@ -243,16 +243,16 @@ Origin Trivia Team`;
         // Pre-process body for GAS (Batch mode doesn't support per-student customization unless GAS handles it)
         // We replace {{student_name}} with "Student" to avoid broken placeholders.
         let processedBody = (customMessage || defaultBody)
-            .replace(/{{Activity_Name}}/g, quizDetails.title)
-            .replace(/{{Subject}}/g, quizDetails.subject)
-            .replace(/{{Branch}}/g, quizDetails.branch)
-            .replace(/{{Year}}/g, quizDetails.year)
-            .replace(/{{Semester}}/g, quizDetails.semester)
-            .replace(/{{Publish_Date}}/g, quizDetails.publishDate || new Date().toLocaleDateString())
-            .replace(/{{Deadline}}/g, quizDetails.deadline || "No Deadline")
-            .replace(/{{Faculty_Name}}/g, quizDetails.facultyName || "Faculty")
-            .replace(/{{student_name}}/g, "Student")
-            .replace(/{Student name}/g, "Student");
+            .replace(/{{Activity_Name}}/gi, quizDetails.title)
+            .replace(/{{Subject}}/gi, quizDetails.subject)
+            .replace(/{{Branch}}/gi, quizDetails.branch)
+            .replace(/{{Year}}/gi, quizDetails.year)
+            .replace(/{{Semester}}/gi, quizDetails.semester)
+            .replace(/{{Publish_Date}}/gi, quizDetails.publishDate || new Date().toLocaleDateString())
+            .replace(/{{Deadline}}/gi, quizDetails.deadline || "No Deadline")
+            .replace(/{{Faculty_Name}}/gi, quizDetails.facultyName || "Faculty")
+            .replace(/{{student_name}}/gi, "Student")
+            .replace(/{Student name}/gi, "Student");
 
         const processedSubject = (customSubject || "New Quiz Available: {{quiz_title}}")
             .replace('{{quiz_title}}', quizDetails.title);
