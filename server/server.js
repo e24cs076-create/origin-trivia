@@ -8,13 +8,23 @@ import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import OpenAI from 'openai';
 
-const _filename = fileURLToPath(import.meta.url);
-const _dirname = path.dirname(_filename);
-
+let _dirname;
 try {
-    dotenv.config({ path: path.join(_dirname, '../.env') });
+    if (typeof __dirname !== 'undefined') {
+        _dirname = __dirname;
+    } else {
+        _dirname = path.dirname(fileURLToPath(import.meta.url));
+    }
 } catch (e) {
-    console.warn("Failed to load .env file (might be in production):", e.message);
+    console.warn("Could not determine dirname (likely in bundled env):", e.message);
+}
+
+if (_dirname) {
+    try {
+        dotenv.config({ path: path.join(_dirname, '../.env') });
+    } catch (e) {
+        console.warn("Failed to load .env file:", e.message);
+    }
 }
 
 const app = express();
