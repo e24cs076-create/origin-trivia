@@ -196,7 +196,7 @@ const ActivitySubmissions = () => {
                                                     link: `${window.location.origin}/student/activity/${activityId}`
                                                 },
                                                 customSubject: "Reminder: Activity Submission",
-                                                customMessage: `Hello {{Student name}},
+                                                customMessage: `Hello Student,
 
 This is a reminder to submit your activity before the deadline.
 
@@ -227,7 +227,7 @@ For any questions, please contact your faculty.
 Thank you.
 
 Best regards,
-{{Faculty_Name}}
+Harsha S
 Origin Trivia Team`
                                             };
 
