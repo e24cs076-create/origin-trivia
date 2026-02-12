@@ -39,6 +39,7 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
+import { API_BASE_URL } from '@/config';
 
 import { ActivityType, QuestionForm, SectionForm, EvaluationMode } from '@/types/activity';
 
@@ -623,7 +624,7 @@ const CreateActivity = () => {
 
       console.log("[CreateActivity] Sending request to /api/notify...");
 
-      const response = await fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001'}/api/notify`, {
+      const response = await fetch(`${API_BASE_URL}/api/notify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -792,7 +793,7 @@ const CreateActivity = () => {
                         className="ml-auto"
                         onClick={async () => {
                           try {
-                            const res = await fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001'}/api/health`);
+                            const res = await fetch(`${API_BASE_URL}/api/health`);
                             if (res.ok) {
                               const data = await res.json();
                               toast({ title: "Connection OK", description: `Server online at ${data.time}` });

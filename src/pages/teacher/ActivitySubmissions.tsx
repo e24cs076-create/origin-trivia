@@ -19,6 +19,7 @@ import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Loader2, ArrowLeft, Eye, Download, FileSpreadsheet, Search, Mail } from 'lucide-react';
 import { format } from 'date-fns';
+import { API_BASE_URL } from '@/config';
 
 const ActivitySubmissions = () => {
     const { activityId } = useParams<{ activityId: string }>();
@@ -231,7 +232,7 @@ Harsha S
 Origin Trivia Team`
                                             };
 
-                                            const response = await fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001'}/api/notify`, {
+                                            const response = await fetch(`${API_BASE_URL}/api/notify`, {
                                                 method: 'POST',
                                                 headers: { 'Content-Type': 'application/json' },
                                                 body: JSON.stringify(payload)
