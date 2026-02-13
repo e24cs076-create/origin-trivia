@@ -401,16 +401,13 @@ process.on('unhandledRejection', (reason, promise) => {
     console.error('Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
-const app = express();
-const port = process.env.PORT || 3001;
-
 // ... (rest of the file remains the same until export) ...
 
 export default app;
 
 // Only start the server if running directly (not imported as a module)
 // In Netlify Functions, this block will be skipped because it is imported by api.js
-if (process.env.NODE_ENV !== 'production' && process.argv[1] === fileURLToPath(import.meta.url)) {
+if (process.env.NODE_ENV !== 'production' && typeof import.meta !== 'undefined' && import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) {
     try {
         const server = app.listen(port, '0.0.0.0', () => {
             console.log(`Server listening at http://0.0.0.0:${port}`);
